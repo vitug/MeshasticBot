@@ -819,7 +819,7 @@ class MeshTelegramBot:
         except Exception as e:
             logger.error(f"Ошибка пересылки в Telegram: {e}", exc_info=True)
 
-    def _forward_auto_reply_to_telegram(self, short_name, original_text, reply_text, reply_id, is_private):
+    def _forward_auto_reply_to_telegram(self, short_name, original_text, reply_text, original_message_id, is_private):
         """Метод для пересылки автоответа в Telegram."""
         if not self.bot or not self.telegram_chat_id:
             return
@@ -827,7 +827,8 @@ class MeshTelegramBot:
         try:
             telegram_parent_id = None
             with msg_mapping_lock:
-                telegram_parent_id = msg_mapping.get(reply_id, {}).get('telegram_msg_id')
+                # Ищем по ID исходного сообщения
+                telegram_parent_id = msg_mapping.get(original_message_id, {}).get('telegram_msg_id')
             
             telegram_reply_to = telegram_parent_id if telegram_parent_id else None
 
@@ -976,12 +977,19 @@ class MeshTelegramBot:
             logger.debug(f"Нода {short_name} не в списке private_node_names, пропускаем автоответ")
             return
 
+        # ✅ ИСПРАВЛЕНИЕ: создаем новый auto_reply_kwargs с replyId = meshtastic_msg_id
+        auto_reply_kwargs = {}
+        if meshtastic_msg_id:
+            auto_reply_kwargs['replyId'] = meshtastic_msg_id  # ID текущего сообщения!
+        if channel_name:
+            auto_reply_kwargs['channel'] = channel_name
+
         reply = None
         
         if is_private:
             reply = self._get_signal_reply(short_name, rssi, snr, self.private_suffix)
             logger.debug(f"Сигнал для private: RSSI={rssi}, SNR={snr}")
-            send_type = self._send_to_meshtastic(reply, send_kwargs, node_id)
+            send_type = self._send_to_meshtastic(reply, auto_reply_kwargs, node_id)  # ✅ используем auto_reply_kwargs
             if send_type:
                 logger.info(f"Отправлен ответ в личный канал: {reply} ({send_type}) -> {node_id}")
                 # Запись АВТООТВЕТА в файл (private)
@@ -1001,18 +1009,19 @@ class MeshTelegramBot:
                 reply = self._get_direct_reply(short_name, snr, rssi, self.general_suffix)
                 logger.warning(f"Хопы не определены, fallback на сигнал")
             
-            send_type = self._send_to_meshtastic(reply, send_kwargs)
+            send_type = self._send_to_meshtastic(reply, auto_reply_kwargs)  # ✅ используем auto_reply_kwargs
             if send_type:
                 logger.info(f"Отправлен ответ: {reply} (broadcast)")
                 # Запись АВТООТВЕТА в файл (general)
                 self._log_message_to_file('general', short_name, reply, is_bot_reply=True)
         
         if reply:
+            # ✅ передаем meshtastic_msg_id (ID исходного сообщения)
             self._forward_auto_reply_to_telegram(
                 short_name, 
                 original_text, 
                 reply, 
-                meshtastic_msg_id,
+                meshtastic_msg_id,  # это правильный ID!
                 is_private
             )
 
