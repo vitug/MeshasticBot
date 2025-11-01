@@ -1,0 +1,12 @@
+
+{
+  "ip": "192.168.1.100",
+  "port": 4403,
+  "telegram_token": "",
+  "telegram_chat_id": "",
+  "keywords": ["ping", "signal", "test"],
+  "private_node_names": ["alice", "bob", "charlie"],
+  "general_suffix": "73!",
+  "private_suffix": "📡",
+  "default_channel": 0
+}
