@@ -11,8 +11,8 @@ This project is a Telegram bot for integrating with the Meshtastic network. The 
     text
     
     ```
-    git clone <your-repo-url>
-    cd meshtastic-telegram-bot
+    git clone https://github.com/vitug/MeshasticBot.git
+    cd MeshasticBot
     ```
     
 2. Установите зависимости:
