@@ -66,6 +66,7 @@ class MeshTelegramBot:
         self.last_reconnect_attempt = 0
         self.last_connection_check = 0
         self.reconnect_in_progress = False
+        self.manual_disconnect = False  # ✅ НОВЫЙ ФЛАГ: ручное отключение пользователем
         
         self._load_config()
         self._init_messages_dir()
@@ -398,7 +399,9 @@ class MeshTelegramBot:
         if self.is_connected:
             self.is_connected = False
             logger.warning("⚠️ Соединение с Meshtastic потеряно")
-            print("⚠️ Соединение с Meshtastic потеряно. Попытка переподключения...")
+            # ✅ Не выводим сообщение о попытке переподключения, если было ручное отключение
+            if not self.manual_disconnect:
+                print("⚠️ Соединение с Meshtastic потеряно. Попытка переподключения...")
 
     def _send_to_meshtastic(self, text, send_kwargs, node_id=None):
         """Сервисный метод: отправка текста в Meshtastic (unicast или broadcast)."""
@@ -532,6 +535,11 @@ class MeshTelegramBot:
 
     def _attempt_reconnect(self):
         """Сервисный метод: попытка переподключения к Meshtastic."""
+        # ✅ ИСПРАВЛЕНИЕ: не переподключаться, если было ручное отключение
+        if self.manual_disconnect:
+            logger.debug("Автопереподключение отключено (manual_disconnect=True)")
+            return
+            
         if self.reconnect_in_progress:
             return
         
@@ -602,11 +610,14 @@ class MeshTelegramBot:
                 return
 
             status = "🟢 Подключено" if self.is_connected else "🔴 Отключено"
+            # ✅ Показываем режим автопереподключения
+            auto_reconnect = "❌ Отключено (ручное отключение)" if self.manual_disconnect else "✅ Включено"
             nodes_count = len(self.node_map)
             
             status_text = f"""📊 Статус Meshtastic бота:
             
 Подключение: {status}
+Автопереподключение: {auto_reconnect}
 Адрес: {self.ip}:{self.port}
 Известных нод: {nodes_count}
 Приватных нод: {len(self.private_node_names)}
@@ -648,11 +659,15 @@ class MeshTelegramBot:
                 self.bot.reply_to(message, "Использование: /connect [ip:port]")
                 return
 
+            # ✅ ИСПРАВЛЕНИЕ: сбрасываем флаг ручного отключения при команде /connect
+            self.manual_disconnect = False
+            logger.info("Сброшен флаг manual_disconnect (пользователь вызвал /connect)")
+            
             success = self._connect_meshtastic(ip, port)
             if success:
-                self.bot.reply_to(message, f"✓ Подключено к {addr_str} успешно!")
+                self.bot.reply_to(message, f"✓ Подключено к {addr_str} успешно!\nАвтопереподключение включено.")
             else:
-                self.bot.reply_to(message, f"✗ Ошибка подключения к {addr_str}. Проверьте логи.")
+                self.bot.reply_to(message, f"✗ Ошибка подключения к {addr_str}. Проверьте логи.\nАвтопереподключение включено.")
         except Exception as e:
             logger.error(f"Ошибка обработки /connect: {e}")
             self.bot.reply_to(message, f"Ошибка: {e}")
@@ -665,8 +680,12 @@ class MeshTelegramBot:
                 self.bot.reply_to(message, "Доступ запрещён для этого чата.")
                 return
 
+            # ✅ ИСПРАВЛЕНИЕ: устанавливаем флаг ручного отключения
+            self.manual_disconnect = True
+            logger.info("Установлен флаг manual_disconnect (пользователь вызвал /disconnect)")
+            
             self._disconnect_meshtastic()
-            self.bot.reply_to(message, "✓ Отключено от Meshtastic.")
+            self.bot.reply_to(message, "✓ Отключено от Meshtastic.\nАвтопереподключение отключено.\nИспользуйте /connect для повторного подключения.")
         except Exception as e:
             logger.error(f"Ошибка обработки /disconnect: {e}")
             self.bot.reply_to(message, f"Ошибка: {e}")
@@ -782,12 +801,23 @@ class MeshTelegramBot:
             except:
                 pass
 
-    def _forward_to_telegram(self, meshtastic_msg_id, short_name, original_text, node_id, is_private, rssi, snr, hop_count):
-        """Метод для пересылки сообщения из Meshtastic в Telegram."""
+    def _forward_to_telegram(self, meshtastic_msg_id, short_name, original_text, node_id, is_private, rssi, snr, hop_count, reply_id=None):
+        """Метод для пересылки сообщения из Meshtastic в Telegram с поддержкой reply."""
         if not self.bot or not self.telegram_chat_id:
             return
         
         try:
+            # ✅ Поиск родительского сообщения в Telegram, если есть reply_id
+            telegram_parent_id = None
+            if reply_id:
+                with msg_mapping_lock:
+                    parent_info = msg_mapping.get(reply_id, {})
+                    telegram_parent_id = parent_info.get('telegram_msg_id')
+                    if telegram_parent_id:
+                        logger.debug(f"Найдено родительское сообщение в Telegram: {telegram_parent_id} для reply_id: {reply_id}")
+                    else:
+                        logger.debug(f"Родительское сообщение не найдено в маппинге для reply_id: {reply_id}")
+            
             prefix = f"[PRIVATE from {short_name}] " if is_private else f"[{short_name}] "
             telegram_text = prefix + original_text
 
@@ -799,8 +829,14 @@ class MeshTelegramBot:
             if signal_info:
                 telegram_text += signal_info
 
-            sent_msg = self.bot.send_message(self.telegram_chat_id, telegram_text)
+            # ✅ Отправка с reply_to_message_id если есть родительское сообщение
+            sent_msg = self.bot.send_message(
+                self.telegram_chat_id, 
+                telegram_text,
+                reply_to_message_id=telegram_parent_id if telegram_parent_id else None
+            )
             
+            # Сохранение маппинга для будущих reply
             if meshtastic_msg_id:
                 with msg_mapping_lock:
                     if len(msg_mapping) >= MAX_MAPPING_SIZE:
@@ -812,7 +848,8 @@ class MeshTelegramBot:
                         'is_private': is_private
                     }
             
-            logger.info(f"Переслано в Telegram: {telegram_text} (msg_id: {sent_msg.message_id}, meshtastic_id: {meshtastic_msg_id}, private: {is_private})")
+            reply_info = f", reply_to: {telegram_parent_id}" if telegram_parent_id else ""
+            logger.info(f"Переслано в Telegram: {telegram_text} (msg_id: {sent_msg.message_id}, meshtastic_id: {meshtastic_msg_id}, private: {is_private}{reply_info})")
             
         except telebot.apihelper.ApiException as e:
             logger.error(f"Telegram API ошибка при пересылке: {e}")
@@ -935,6 +972,7 @@ class MeshTelegramBot:
                 forward_to_telegram = True
 
             if forward_to_telegram:
+                # ✅ Передаем reply_id для создания reply-цепочки в Telegram
                 self._forward_to_telegram(
                     meshtastic_msg_id,
                     short_name, 
@@ -943,7 +981,8 @@ class MeshTelegramBot:
                     is_private, 
                     rssi, 
                     snr, 
-                    hop_count
+                    hop_count,
+                    reply_id  # Передаем reply_id!
                 )
 
             if has_keywords:
@@ -1059,8 +1098,8 @@ class MeshTelegramBot:
                         logger.error(f"Ошибка проверки config.json: {e}")
                     last_config_check = now
 
-                # Проверка соединения и автопереподключение
-                if now - self.last_connection_check >= CONNECTION_CHECK_INTERVAL:
+                # ✅ ИСПРАВЛЕНИЕ: проверка соединения и автопереподключение только если не было ручного отключения
+                if not self.manual_disconnect and now - self.last_connection_check >= CONNECTION_CHECK_INTERVAL:
                     if not self._check_connection():
                         if self.is_connected:
                             self._mark_disconnected()
