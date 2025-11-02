@@ -1,5 +1,6 @@
 import json
 import logging
+import socket  # Для типов сетевых ошибок
 from meshtastic.tcp_interface import TCPInterface
 from meshtastic.protobuf import config_pb2, channel_pb2
 from pubsub import pub
@@ -35,9 +36,9 @@ MAX_MAPPING_SIZE = 1000
 MAX_BYTES_PER_MESSAGE = 200
 MESSAGE_SPLIT_DELAY = 1.5
 
-# Константы для автопереподключения
-RECONNECT_INTERVAL = 10
-CONNECTION_CHECK_INTERVAL = 5
+# Константы для автопереподключения (улучшено)
+RECONNECT_INTERVAL = 30  # Увеличено для снижения спама
+CONNECTION_CHECK_INTERVAL = 10  # Чуть чаще проверять
 
 
 class MeshTelegramBot:
@@ -404,13 +405,18 @@ class MeshTelegramBot:
         return f"{short_name} SNR: {snr}, RSSI: {rssi} {suffix}"
 
     def _check_connection(self):
-        """Сервисный метод: проверка состояния соединения с Meshtastic."""
+        """Сервисный метод: проверка состояния соединения с Meshtastic (улучшено)."""
         if not self.interface:
             return False
         
         try:
-            _ = self.interface.nodesByNum
+            # Пробуем heartbeat для провокации ошибки, если сокет мёртв
+            self.interface.sendHeartbeat()
+            _ = self.interface.nodesByNum  # Дополнительная проверка
             return True
+        except (socket.error, BrokenPipeError, ConnectionResetError, OSError) as e:
+            logger.warning(f"Сетевая ошибка в check_connection: {e} (тип: {type(e).__name__})")
+            return False
         except Exception as e:
             logger.warning(f"Проверка соединения не удалась: {e}")
             return False
@@ -671,7 +677,7 @@ class MeshTelegramBot:
             return False
 
     def _attempt_reconnect(self):
-        """Сервисный метод: попытка переподключения к Meshtastic."""
+        """Сервисный метод: попытка переподключения к Meshtastic (с экспоненциальным backoff)."""
         # не переподключаться, если было ручное отключение
         if self.manual_disconnect:
             logger.debug("Автопереподключение отключено (manual_disconnect=True)")
@@ -681,13 +687,15 @@ class MeshTelegramBot:
             return
         
         now = time.time()
-        if now - self.last_reconnect_attempt < RECONNECT_INTERVAL:
+        # Экспоненциальный backoff: 1->2->4->... мин, max 5 мин
+        backoff = min(2 ** ((now - self.last_reconnect_attempt) // 60), 300)
+        if now - self.last_reconnect_attempt < backoff:
             return
         
         self.reconnect_in_progress = True
         self.last_reconnect_attempt = now
         
-        logger.info(f"🔄 Попытка переподключения к {self.ip}:{self.port}...")
+        logger.info(f"🔄 Попытка переподключения к {self.ip}:{self.port} (backoff: {backoff}s)...")
         print(f"🔄 Попытка переподключения к {self.ip}:{self.port}...")
         
         success = self._connect_meshtastic(self.ip, self.port)
@@ -697,9 +705,24 @@ class MeshTelegramBot:
             print("✓ Переподключение к Meshtastic успешно!")
             self._scan_nodes()
         else:
-            logger.warning(f"✗ Переподключение не удалось. Следующая попытка через {RECONNECT_INTERVAL} сек")
+            logger.warning(f"✗ Переподключение не удалось. Следующая попытка через {backoff}s")
         
         self.reconnect_in_progress = False
+
+    def _on_disconnect(self, interface=None):
+        """Обработчик потери соединения (если pubsub поддерживает)."""
+        logger.warning("Событие потери соединения от meshtastic")
+        self._mark_disconnected()
+        if not self.manual_disconnect:
+            self._attempt_reconnect()
+
+    def _handle_meshtastic_error(self, error):
+        """Ловит внутренние ошибки meshtastic (включая BrokenPipe)."""
+        logger.error(f"Ошибка от meshtastic: {error}")
+        if isinstance(error, (BrokenPipeError, ConnectionResetError, OSError)):
+            self._mark_disconnected()
+            if not self.manual_disconnect:
+                self._attempt_reconnect()
 
     # ==================== МЕТОДЫ ДЛЯ TELEGRAM-БОТА ====================
     
@@ -1188,10 +1211,13 @@ Telegram timeout: {self.telegram_timeout}s
             print(f"✗ Ошибка подключения: {e}. Будет выполнено автопереподключение.")
 
     def _setup_subscriptions(self):
-        """Настройка подписки на события Meshtastic."""
+        """Настройка подписки на события Meshtastic (улучшено)."""
         if self.interface:
             pub.subscribe(self._on_receive, "meshtastic.receive")
-            logger.info("Подписка на события meshtastic.receive установлена")
+            # Подписка на события потери соединения и ошибок (если поддерживается)
+            pub.subscribe(self._on_disconnect, "meshtastic.connection-lost")
+            pub.subscribe(self._handle_meshtastic_error, "meshtastic.error")
+            logger.info("Подписка на события meshtastic установлена")
 
     def _on_receive(self, packet, interface):
         """Основной обработчик входящих сообщений из Meshtastic."""
@@ -1363,32 +1389,38 @@ Telegram timeout: {self.telegram_timeout}s
             while True:
                 now = time.time()
                 
-                # Проверка изменений config.json
-                if now - last_config_check >= config_check_interval:
-                    try:
-                        current_mtime = os.path.getmtime('config.json')
-                        if current_mtime > self.config_mtime:
-                            logger.info(f"Обнаружено изменение config.json, перезагружаем...")
-                            self._reload_config()
-                    except Exception as e:
-                        logger.error(f"Ошибка проверки config.json: {e}")
-                    last_config_check = now
+                try:
+                    # Проверка изменений config.json
+                    if now - last_config_check >= config_check_interval:
+                        try:
+                            current_mtime = os.path.getmtime('config.json')
+                            if current_mtime > self.config_mtime:
+                                logger.info(f"Обнаружено изменение config.json, перезагружаем...")
+                                self._reload_config()
+                        except Exception as e:
+                            logger.error(f"Ошибка проверки config.json: {e}")
+                        last_config_check = now
 
-                # проверка соединения и автопереподключение только если не было ручного отключения
-                if not self.manual_disconnect and now - self.last_connection_check >= CONNECTION_CHECK_INTERVAL:
-                    if not self._check_connection():
-                        if self.is_connected:
-                            self._mark_disconnected()
+                    # проверка соединения и автопереподключение только если не было ручного отключения
+                    if not self.manual_disconnect and now - self.last_connection_check >= CONNECTION_CHECK_INTERVAL:
+                        if not self._check_connection():
+                            if self.is_connected:
+                                self._mark_disconnected()
+                            self._attempt_reconnect()
+                        self.last_connection_check = now
+
+                    # Периодическое сканирование нод
+                    if now - self.last_node_scan >= self.node_scan_interval and self.interface and self.is_connected:
+                        self._scan_nodes()
+                        self.last_node_scan = now
+
+                    time.sleep(1)
+                except Exception as loop_e:
+                    logger.error(f"Ошибка в main loop: {loop_e}", exc_info=True)
+                    self._mark_disconnected()
+                    if not self.manual_disconnect:
                         self._attempt_reconnect()
-                    self.last_connection_check = now
-
-                # Периодическое сканирование нод
-                if now - self.last_node_scan >= self.node_scan_interval and self.interface and self.is_connected:
-                    self._scan_nodes()
-                    self.last_node_scan = now
-
-                time.sleep(1)
-                
+                        
         except KeyboardInterrupt:
             logger.info("Получен сигнал прерывания (Ctrl+C)")
             print("\n⏹️  Остановка приложения...")
