@@ -515,15 +515,17 @@ class MeshTelegramBot:
             tuple: (success, old_name, new_name)
         """
         try:
-            # Получаем информацию о локальной ноде
+            # Получаем локальную ноду
             local_node = self.interface.localNode
-            if not local_node.localConfig or not local_node.localConfig.device:
-                logger.warning("localConfig.device не загружен, пропускаем обновление имени")
+            if not local_node:
+                logger.warning("localNode не доступен, пропускаем обновление имени")
                 return False, None, None
 
-            current_device = local_node.localConfig.device
-            current_long_name = current_device.long_name or "Node"  # Fallback если пусто
-            
+            # Безопасное чтение текущего long_name из user
+            user = getattr(local_node, 'user', None)
+            current_long_name = "Node"  # Fallback
+            if user and hasattr(user, 'long_name'):
+                current_long_name = user.long_name or "Node"
             logger.debug(f"Текущее longName: '{current_long_name}', shortName не изменяется")
             
             # Паттерн для поиска старого пресета в скобках в конце имени
@@ -546,13 +548,9 @@ class MeshTelegramBot:
             
             logger.info(f"Обновление longName ноды: '{current_long_name}' -> '{new_long_name}'")
             
-            # Обновляем только longName, shortName НЕ трогаем
-            current_device.long_name = new_long_name
-            write_success = local_node.writeConfig("device")
-            if not write_success:
-                logger.warning("writeConfig('device') failed, but config is set locally. Reboot may be needed.")
-            
-            logger.info(f"LongName ноды обновлено: {new_long_name} (write success: {write_success})")
+            # Обновляем через setOwner (отправляет admin-сообщение, shortName НЕ трогаем)
+            local_node.setOwner(long_name=new_long_name)
+            logger.info(f"LongName ноды обновлено через setOwner: {new_long_name}")
             return True, current_long_name, new_long_name
             
         except Exception as e:
