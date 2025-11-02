@@ -58,7 +58,7 @@ class MeshTelegramBot:
         self.telegram_token = None
         self.telegram_chat_id = None
         self.default_channel = None
-        self.node_long_name = 'Node'  # NEW: Храним long_name в классе (fallback)
+        self.node_long_name = 'Node'  # Храним long_name в классе (fallback)
         self.config_mtime = 0
         self.last_node_scan = 0
         self.node_scan_interval = 30
@@ -95,7 +95,7 @@ class MeshTelegramBot:
             self.telegram_token = self.config.get('telegram_token')
             self.telegram_chat_id = str(self.config.get('telegram_chat_id', '')) if self.config.get('telegram_chat_id') else None
             self.default_channel = self.config.get('default_channel')
-            self.node_long_name = self.config.get('node_long_name', 'Node')  # NEW: Загружаем long_name из config
+            self.node_long_name = self.config.get('node_long_name', 'Node')  # Загружаем long_name из config
             self.config_mtime = os.path.getmtime('config.json')
             
             if not self.telegram_token:
@@ -106,7 +106,7 @@ class MeshTelegramBot:
             
             logger.info(f"Конфигурация загружена: IP={self.ip}, Port={self.port}, Keywords={self.keywords}, "
                         f"Private nodes={self.private_node_names}, General suffix='{self.general_suffix}', "
-                        f"Private suffix='{self.private_suffix}', Node long_name='{self.node_long_name}', "  # NEW: Лог
+                        f"Private suffix='{self.private_suffix}', Node long_name='{self.node_long_name}', "
                         f"Telegram: {'enabled' if self.telegram_token else 'disabled'}")
         except FileNotFoundError:
             logger.error("Файл config.json не найден!")
@@ -205,7 +205,7 @@ class MeshTelegramBot:
             self.general_suffix = new_config.get('general_suffix', '')
             self.private_suffix = new_config.get('private_suffix', '')
             self.default_channel = new_config.get('default_channel')
-            self.node_long_name = new_config.get('node_long_name', 'Node')  # NEW: Перезагружаем long_name
+            self.node_long_name = new_config.get('node_long_name', 'Node')  # Перезагружаем long_name
             
             new_telegram_token = new_config.get('telegram_token')
             new_telegram_chat_id = str(new_config.get('telegram_chat_id', '')) if new_config.get('telegram_chat_id') else None
@@ -216,7 +216,7 @@ class MeshTelegramBot:
                 self.telegram_chat_id = new_telegram_chat_id
             
             self.config_mtime = os.path.getmtime('config.json')
-            logger.info("Конфигурация перезагружена успешно (keywords, suffixes, private_nodes, node_long_name обновлены)")  # NEW: Добавлен long_name
+            logger.info("Конфигурация перезагружена успешно (keywords, suffixes, private_nodes, node_long_name обновлены)")
         except Exception as e:
             logger.error(f"Ошибка перезагрузки config.json: {e}")
 
@@ -250,7 +250,7 @@ class MeshTelegramBot:
                 logger.error(f"Ошибка сохранения chat_id в config: {e}")
                 print(f"chat_id {chat_id} определён, но не сохранён в config. Добавьте вручную: 'telegram_chat_id': '{chat_id}'")
 
-    def _save_node_long_name_to_config(self, new_name):  # NEW: Метод для сохранения обновлённого long_name
+    def _save_node_long_name_to_config(self, new_name):
         """Сервисный метод: сохранение node_long_name в config.json."""
         if self.config is not None:
             self.config['node_long_name'] = new_name
@@ -519,16 +519,16 @@ class MeshTelegramBot:
         return None, None, False
 
     def _get_current_node_info(self):
-        """Вспомогательный метод: получение текущего long_name и modem_preset."""  # NEW: Упрощён — long_name из config
+        """Вспомогательный метод: получение текущего long_name, modem_preset и channel_num."""
         if not self.interface or not self.is_connected:
-            return self.node_long_name, "Не подключено"  # Fallback на config для long_name
+            return self.node_long_name, "Не подключено", "Не подключено"  # Fallback на config для long_name
 
         try:
-            # long_name всегда из config (NEW)
+            # long_name всегда из config
             long_name = self.node_long_name
             logger.debug(f"Node long_name loaded from config: '{long_name}'")
 
-            # Получаем modem_preset (LoRa config) — это уже работает
+            # Получаем modem_preset (LoRa config)
             local_node = self.interface.localNode
             if local_node and local_node.localConfig and local_node.localConfig.lora:
                 modem_preset = local_node.localConfig.lora.modem_preset
@@ -545,19 +545,24 @@ class MeshTelegramBot:
                     config_pb2.Config.LoRaConfig.ModemPreset.SHORT_TURBO: "Short Turbo",
                 }
                 preset_name = preset_map.get(modem_preset, f"Unknown ({modem_preset})")
+                
+                # Получаем channel_num (ранее freq_slot)
+                channel_num = local_node.localConfig.lora.channel_num
+                channel_num_name = f"{channel_num}" if channel_num is not None else "Не загружено"
             else:
                 preset_name = "Не загружено (запросите /set_preset для загрузки)"
+                channel_num_name = "Не загружено"
 
-            return long_name, preset_name
+            return long_name, preset_name, channel_num_name
         except Exception as e:
             logger.error(f"Ошибка получения node info: {e}")
-            return self.node_long_name, "Ошибка"  # Fallback на config
+            return self.node_long_name, "Ошибка", "Ошибка"  # Fallback на config
 
     def _update_node_name_with_preset(self, preset_abbr, slot):
         """
         Обновление longName ноды с добавлением пресета.
         ShortName не изменяется (остается как есть, обычно 4 символа).
-        Базовое имя берём из config (NEW).
+        Базовое имя берём из config.
         
         Args:
             preset_abbr: сокращение пресета (LF, MS, SF, VLS, LS)
@@ -573,7 +578,7 @@ class MeshTelegramBot:
                 logger.warning("localNode не доступен, пропускаем обновление имени")
                 return False, None, None
 
-            # NEW: Базовое имя из config (вместо чтения из Meshtastic)
+            # Базовое имя из config (вместо чтения из Meshtastic)
             current_long_name = self.node_long_name
             logger.debug(f"Текущее longName из config: '{current_long_name}', shortName не изменяется")
             
@@ -597,7 +602,7 @@ class MeshTelegramBot:
             
             logger.info(f"Обновление longName ноды: '{current_long_name}' -> '{new_long_name}' (из config + суффикс)")
             
-            # NEW: Сохраняем обновлённое имя в config
+            # Сохраняем обновлённое имя в config
             self._save_node_long_name_to_config(new_long_name)
             
             # Обновляем через setOwner (отправляет admin-сообщение, shortName НЕ трогаем)
@@ -735,8 +740,8 @@ class MeshTelegramBot:
             auto_reconnect = "❌ Отключено (ручное отключение)" if self.manual_disconnect else "✅ Включено"
             nodes_count = len(self.node_map)
             
-            # Получаем текущее имя ноды и пресет
-            long_name, preset_name = self._get_current_node_info()
+            # Получаем текущее имя ноды, пресет и channel_num
+            long_name, preset_name, channel_num_name = self._get_current_node_info()
             
             status_text = f"""📊 Статус Meshtastic бота:
             
@@ -746,8 +751,9 @@ class MeshTelegramBot:
 Известных нод: {nodes_count}
 Приватных нод: {len(self.private_node_names)}
 Ключевых слов: {len(self.keywords)}
-Имя ноды (long_name): {long_name}  # NEW: Из config
+Имя ноды (long_name): {long_name}
 LoRa пресет: {preset_name}
+Channel num: {channel_num_name}  # Channel num (ранее freq_slot)
             """
             
             self.bot.reply_to(message, status_text)
@@ -935,6 +941,7 @@ LoRa пресет: {preset_name}
             # Установка глобального пресета LoRa
             lora_write_success = False
             old_preset = None
+            old_slot = None
             try:
                 local_node = self.interface.localNode
                 local_config = local_node.localConfig
@@ -942,14 +949,21 @@ LoRa пресет: {preset_name}
                     raise Exception("localConfig.lora не загружен")
                 
                 old_preset = local_config.lora.modem_preset
-                logger.info(f"Старый пресет: {old_preset}")
+                old_slot = local_config.lora.channel_num
+                logger.info(f"Старый пресет: {old_preset}, старый slot: {old_slot}")
+                
                 local_config.lora.modem_preset = modem_config
                 logger.info(f"Новый пресет установлен локально: {modem_config}")
+                
+                # Установка channel_num в LoRa config (ранее freq_slot)
+                local_config.lora.channel_num = slot  # 0-7 для frequency hopping/offset
+                logger.info(f"Channel num установлен локально: {slot}")
+                
                 lora_write_success = local_node.writeConfig("lora")
                 if not lora_write_success:
                     logger.warning("writeConfig('lora') failed, but config is set locally. Reboot may be needed.")
                 else:
-                    logger.info(f"Глобальный пресет успешно записан: {preset_name} (modem_preset={modem_config}, старый={old_preset})")
+                    logger.info(f"Глобальный пресет и channel_num успешно записаны: preset={preset_name} (modem_preset={modem_config}, старый={old_preset}), slot={slot} (старый={old_slot})")
                 
             except Exception as e:
                 logger.error(f"Ошибка установки глобального пресета: {e}")
@@ -958,13 +972,16 @@ LoRa пресет: {preset_name}
             # Обновляем longName ноды с пресетом (shortName не трогаем)
             name_success, old_name, new_name = self._update_node_name_with_preset(preset_abbr, slot)
             
-            # NEW: new_name теперь из config (после _save_node_long_name_to_config)
+            # new_name теперь из config (после _save_node_long_name_to_config)
             # Формируем ответ в зависимости от успеха
             preset_status = "✅ успешно записан на устройство" if lora_write_success else "⚠️ установлен локально, но запись на устройство не удалась"
             name_status = f"📝 LongName обновлено: {old_name} → {new_name} (сохранено в config)" if name_success else "⚠️ Не удалось обновить longName автоматически"
             
+            slot_status = f"📡 Channel num: {slot} ({'успешно записан' if lora_write_success else 'установлен локально'})"
+            
             response_text = f"""**{preset_status}**: Глобальный пресет '{preset_display_name}'!
 {name_status}
+{slot_status}
 ℹ️ ShortName остается без изменений
 🔄 Слот {slot} использован только для тега имени
 
@@ -1316,7 +1333,7 @@ LoRa пресет: {preset_name}
         print(f"🚀 Запуск Meshtastic Telegram Bot...")
         print(f"📡 Адрес Meshtastic: {self.ip}:{self.port}")
         print(f"🤖 Telegram: {'включен' if self.bot else 'отключен'}")
-        print(f"📝 Node long_name из config: {self.node_long_name}")  # NEW: Лог при запуске
+        print(f"📝 Node long_name из config: {self.node_long_name}")
 
         if self.bot:
             telegram_thread = threading.Thread(target=self._start_telegram_polling, daemon=True)
