@@ -68,7 +68,7 @@ class MeshTelegramBot:
         
         # Флаги для автопереподключения
         self.is_connected = False
-        self.last_reconnect_attempt = 0
+        self.last_reconnect_attempt = time.time()  # Фикс: Инициализируем текущим временем, чтобы избежать overflow на старте
         self.last_connection_check = 0
         self.reconnect_in_progress = False
         self.manual_disconnect = False
@@ -364,7 +364,6 @@ class MeshTelegramBot:
                         if short_name not in self.node_map or self.node_map[short_name] != node_id:
                             self.node_map[short_name] = node_id
                             updated = True
-                            logger.debug(f"Сканирование: обновлён {short_name} -> {node_id}")
             if updated:
                 logger.info(f"Node_map обновлён: {len(self.node_map)} нод")
         except Exception as e:
@@ -677,7 +676,7 @@ class MeshTelegramBot:
             return False
 
     def _attempt_reconnect(self):
-        """Сервисный метод: попытка переподключения к Meshtastic (с экспоненциальным backoff)."""
+        """Сервисный метод: попытка переподключения к Meshtastic (с экспоненциальным backoff, фикс overflow)."""
         # не переподключаться, если было ручное отключение
         if self.manual_disconnect:
             logger.debug("Автопереподключение отключено (manual_disconnect=True)")
@@ -687,9 +686,13 @@ class MeshTelegramBot:
             return
         
         now = time.time()
-        # Экспоненциальный backoff: 1->2->4->... мин, max 5 мин
-        backoff = min(2 ** ((now - self.last_reconnect_attempt) // 60), 300)
+        # Фикс overflow: int(exponent), cap на 0 и max 10 (2^10=1024 сек ~17 мин)
+        exponent = max(0, int((now - self.last_reconnect_attempt) // 60))
+        backoff = min(1 << min(exponent, 10), 300)  # Битовый сдвиг для int-математики (без pow)
+        logger.debug(f"Backoff calc: exponent={exponent}, backoff={backoff}s")
+        
         if now - self.last_reconnect_attempt < backoff:
+            logger.debug(f"Слишком рано для reconnect (нужно подождать {backoff}s)")
             return
         
         self.reconnect_in_progress = True
