@@ -1,6 +1,7 @@
 import json
 import logging
 from meshtastic.tcp_interface import TCPInterface
+from meshtastic.protobuf import config_pb2, channel_pb2
 from pubsub import pub
 import time
 import telebot
@@ -8,6 +9,7 @@ from telebot import types
 import threading
 import os
 from collections import OrderedDict
+import re
 
 # Настройка логирования в файл
 logging.basicConfig(
@@ -66,7 +68,7 @@ class MeshTelegramBot:
         self.last_reconnect_attempt = 0
         self.last_connection_check = 0
         self.reconnect_in_progress = False
-        self.manual_disconnect = False  # ✅ НОВЫЙ ФЛАГ: ручное отключение пользователем
+        self.manual_disconnect = False
         
         self._load_config()
         self._init_messages_dir()
@@ -399,7 +401,7 @@ class MeshTelegramBot:
         if self.is_connected:
             self.is_connected = False
             logger.warning("⚠️ Соединение с Meshtastic потеряно")
-            # ✅ Не выводим сообщение о попытке переподключения, если было ручное отключение
+            # Не выводим сообщение о попытке переподключения, если было ручное отключение
             if not self.manual_disconnect:
                 print("⚠️ Соединение с Meshtastic потеряно. Попытка переподключения...")
 
@@ -500,6 +502,63 @@ class MeshTelegramBot:
                     return mid, info['node_id'], info['is_private']
         return None, None, False
 
+    def _update_node_name_with_preset(self, preset_abbr, slot):
+        """
+        Обновление longName ноды с добавлением пресета.
+        ShortName не изменяется (остается как есть, обычно 4 символа).
+        
+        Args:
+            preset_abbr: сокращение пресета (LF, MS, SF, VLS, LS)
+            slot: номер слота
+            
+        Returns:
+            tuple: (success, old_name, new_name)
+        """
+        try:
+            # Получаем информацию о локальной ноде
+            local_node = self.interface.localNode
+            if not local_node.localConfig or not local_node.localConfig.device:
+                logger.warning("localConfig.device не загружен, пропускаем обновление имени")
+                return False, None, None
+
+            current_device = local_node.localConfig.device
+            current_long_name = current_device.long_name or "Node"  # Fallback если пусто
+            
+            logger.debug(f"Текущее longName: '{current_long_name}', shortName не изменяется")
+            
+            # Паттерн для поиска старого пресета в скобках в конце имени
+            # Ищет паттерн типа (LF0), (MS1), (VLS2) и т.д. в конце строки
+            preset_pattern = r'\s*\([A-Z]{1,3}\d\)\s*$'
+            
+            # Удаляем старый пресет из longName, если есть
+            base_long_name = re.sub(preset_pattern, '', current_long_name).strip()
+            
+            # Формируем новое longName с пресетом
+            new_preset_tag = f"({preset_abbr}{slot})"
+            new_long_name = f"{base_long_name} {new_preset_tag}"
+            
+            # Ограничение: longName до 40 символов
+            if len(new_long_name) > 40:
+                # Обрезаем базовое имя
+                max_base_len = 40 - len(new_preset_tag) - 1  # -1 для пробела
+                base_long_name = base_long_name[:max_base_len]
+                new_long_name = f"{base_long_name} {new_preset_tag}"
+            
+            logger.info(f"Обновление longName ноды: '{current_long_name}' -> '{new_long_name}'")
+            
+            # Обновляем только longName, shortName НЕ трогаем
+            current_device.long_name = new_long_name
+            write_success = local_node.writeConfig("device")
+            if not write_success:
+                logger.warning("writeConfig('device') failed, but config is set locally. Reboot may be needed.")
+            
+            logger.info(f"LongName ноды обновлено: {new_long_name} (write success: {write_success})")
+            return True, current_long_name, new_long_name
+            
+        except Exception as e:
+            logger.error(f"Ошибка обновления longName ноды: {e}", exc_info=True)
+            return False, None, None
+
     def _disconnect_meshtastic(self):
         """Сервисный метод: отключение от Meshtastic."""
         if self.interface:
@@ -535,7 +594,7 @@ class MeshTelegramBot:
 
     def _attempt_reconnect(self):
         """Сервисный метод: попытка переподключения к Meshtastic."""
-        # ✅ ИСПРАВЛЕНИЕ: не переподключаться, если было ручное отключение
+        # не переподключаться, если было ручное отключение
         if self.manual_disconnect:
             logger.debug("Автопереподключение отключено (manual_disconnect=True)")
             return
@@ -596,6 +655,10 @@ class MeshTelegramBot:
         @self.bot.message_handler(commands=['status'])
         def handle_status(message):
             self._handle_status_command(message)
+
+        @self.bot.message_handler(commands=['set_preset'])
+        def handle_set_preset(message):
+            self._handle_set_preset_command(message)
 
         @self.bot.message_handler(func=lambda message: True)
         def handle_telegram_message(message):
@@ -659,7 +722,7 @@ class MeshTelegramBot:
                 self.bot.reply_to(message, "Использование: /connect [ip:port]")
                 return
 
-            # ✅ ИСПРАВЛЕНИЕ: сбрасываем флаг ручного отключения при команде /connect
+            # сбрасываем флаг ручного отключения при команде /connect
             self.manual_disconnect = False
             logger.info("Сброшен флаг manual_disconnect (пользователь вызвал /connect)")
             
@@ -680,7 +743,7 @@ class MeshTelegramBot:
                 self.bot.reply_to(message, "Доступ запрещён для этого чата.")
                 return
 
-            # ✅ ИСПРАВЛЕНИЕ: устанавливаем флаг ручного отключения
+            # устанавливаем флаг ручного отключения
             self.manual_disconnect = True
             logger.info("Установлен флаг manual_disconnect (пользователь вызвал /disconnect)")
             
@@ -734,6 +797,125 @@ class MeshTelegramBot:
         except Exception as e:
             logger.error(f"Ошибка обработки /pm: {e}")
             self.bot.reply_to(message, f"Ошибка: {e}")
+
+    def _handle_set_preset_command(self, message):
+        """Обработчик команды /set_preset <preset_name> <slot> для переключения LoRa-пресета (глобально)."""
+        try:
+            chat_id = str(message.chat.id)
+            if self.telegram_chat_id and chat_id != self.telegram_chat_id:
+                self.bot.reply_to(message, "❌ Доступ запрещён для этого чата.")
+                return
+
+            if not self.interface or not self.is_connected:
+                self.bot.reply_to(message, "🔴 Не подключено к Meshtastic. Используйте /connect.")
+                return
+
+            parts = message.text.split()
+            if len(parts) != 3:
+                help_text = """❌ Использование: /set_preset <preset> <slot>
+
+Примеры:
+• /set_preset longfast 0
+• /set_preset mediumslow 1
+
+Доступные пресеты (глобальные настройки LoRa):
+• longfast (LF) - дальняя связь, быстрая скорость
+• mediumslow (MS) - средняя дальность, медленная скорость
+• shortfast (SF) - короткая дальность, быстрая скорость
+• verylongslow (VLS) - очень дальняя связь, медленная скорость
+• longslow (LS) - дальняя связь, медленная скорость
+• mediumfast (MF) - средняя дальность, быстрая скорость
+• shortslow (SS) - короткая дальность, медленная скорость
+• longmoderate (LM) - дальняя связь, умеренная скорость
+• shortturbo (ST) - короткая дальность, турбо скорость
+
+Слоты: 0-7 (используется ТОЛЬКО для тегирования longName, e.g., "(LF0)")
+
+⚠️ Пресет применяется глобально ко всем каналам. LongName обновляется с тегом (shortName не меняется).
+После установки: перезагрузите устройство или переподключите бота."""
+                self.bot.reply_to(message, help_text)
+                return
+
+            preset_name = parts[1].lower()
+            
+            try:
+                slot = int(parts[2])
+            except ValueError:
+                self.bot.reply_to(message, "❌ Слот должен быть числом (0-7).")
+                return
+
+            if slot < 0 or slot > 7:
+                self.bot.reply_to(message, "❌ Слот должен быть от 0 до 7.")
+                return
+
+            # Маппинг пресетов на enum И сокращения
+            preset_info = {
+                'longfast': {'enum': config_pb2.Config.LoRaConfig.ModemPreset.LONG_FAST, 'abbr': 'LF', 'display': 'Long Fast'},
+                'longslow': {'enum': config_pb2.Config.LoRaConfig.ModemPreset.LONG_SLOW, 'abbr': 'LS', 'display': 'Long Slow'},
+                'verylongslow': {'enum': config_pb2.Config.LoRaConfig.ModemPreset.VERY_LONG_SLOW, 'abbr': 'VLS', 'display': 'Very Long Slow'},
+                'mediumslow': {'enum': config_pb2.Config.LoRaConfig.ModemPreset.MEDIUM_SLOW, 'abbr': 'MS', 'display': 'Medium Slow'},
+                'mediumfast': {'enum': config_pb2.Config.LoRaConfig.ModemPreset.MEDIUM_FAST, 'abbr': 'MF', 'display': 'Medium Fast'},
+                'shortslow': {'enum': config_pb2.Config.LoRaConfig.ModemPreset.SHORT_SLOW, 'abbr': 'SS', 'display': 'Short Slow'},
+                'shortfast': {'enum': config_pb2.Config.LoRaConfig.ModemPreset.SHORT_FAST, 'abbr': 'SF', 'display': 'Short Fast'},
+                'longmoderate': {'enum': config_pb2.Config.LoRaConfig.ModemPreset.LONG_MODERATE, 'abbr': 'LM', 'display': 'Long Moderate'},
+                'shortturbo': {'enum': config_pb2.Config.LoRaConfig.ModemPreset.SHORT_TURBO, 'abbr': 'ST', 'display': 'Short Turbo'},
+            }
+
+            if preset_name not in preset_info:
+                self.bot.reply_to(message, "❌ Неизвестный пресет. Используйте /set_preset без параметров для справки.")
+                return
+
+            modem_config = preset_info[preset_name]['enum']
+            preset_abbr = preset_info[preset_name]['abbr']
+            preset_display_name = preset_info[preset_name]['display']
+
+            # Установка глобального пресета LoRa
+            lora_write_success = False
+            old_preset = None
+            try:
+                local_node = self.interface.localNode
+                local_config = local_node.localConfig
+                if not local_config.lora:
+                    raise Exception("localConfig.lora не загружен")
+                
+                old_preset = local_config.lora.modem_preset
+                logger.info(f"Старый пресет: {old_preset}")
+                local_config.lora.modem_preset = modem_config
+                logger.info(f"Новый пресет установлен локально: {modem_config}")
+                lora_write_success = local_node.writeConfig("lora")
+                if not lora_write_success:
+                    logger.warning("writeConfig('lora') failed, but config is set locally. Reboot may be needed.")
+                else:
+                    logger.info(f"Глобальный пресет успешно записан: {preset_name} (modem_preset={modem_config}, старый={old_preset})")
+                
+            except Exception as e:
+                logger.error(f"Ошибка установки глобального пресета: {e}")
+                lora_write_success = False
+
+            # Обновляем longName ноды с пресетом (shortName не трогаем)
+            name_success, old_name, new_name = self._update_node_name_with_preset(preset_abbr, slot)
+            
+            # Формируем ответ в зависимости от успеха
+            preset_status = "✅ успешно записан на устройство" if lora_write_success else "⚠️ установлен локально, но запись на устройство не удалась"
+            name_status = f"📝 LongName обновлено: {old_name} → {new_name}" if name_success else "⚠️ Не удалось обновить longName автоматически"
+            
+            response_text = f"""**{preset_status}**: Глобальный пресет '{preset_display_name}'!
+{name_status}
+ℹ️ ShortName остается без изменений
+🔄 Слот {slot} использован только для тега имени
+
+⚠️ Для применения изменений:
+1. **Перезагрузите устройство** (обязательно для LoRa пресетов)
+2. Переподключите бота (/disconnect + /connect)
+3. Проверьте в Meshtastic app (Settings > Radio Configuration > LoRa)
+
+Если запись не удалась, попробуйте вручную в приложении."""
+            
+            self.bot.reply_to(message, response_text, parse_mode='Markdown')
+                
+        except Exception as e:
+            logger.error(f"Ошибка обработки /set_preset: {e}", exc_info=True)
+            self.bot.reply_to(message, f"✗ Ошибка: {str(e)}")
 
     def _handle_telegram_message(self, message):
         """Обработчик сообщений из Telegram: отправка в Meshtastic."""
@@ -807,7 +989,7 @@ class MeshTelegramBot:
             return
         
         try:
-            # ✅ Поиск родительского сообщения в Telegram, если есть reply_id
+            # Поиск родительского сообщения в Telegram, если есть reply_id
             telegram_parent_id = None
             if reply_id:
                 with msg_mapping_lock:
@@ -829,7 +1011,7 @@ class MeshTelegramBot:
             if signal_info:
                 telegram_text += signal_info
 
-            # ✅ Отправка с reply_to_message_id если есть родительское сообщение
+            # Отправка с reply_to_message_id если есть родительское сообщение
             sent_msg = self.bot.send_message(
                 self.telegram_chat_id, 
                 telegram_text,
@@ -982,7 +1164,7 @@ class MeshTelegramBot:
                     rssi, 
                     snr, 
                     hop_count,
-                    reply_id  # Передаем reply_id!
+                    reply_id
                 )
 
             if has_keywords:
@@ -1016,10 +1198,9 @@ class MeshTelegramBot:
             logger.debug(f"Нода {short_name} не в списке private_node_names, пропускаем автоответ")
             return
 
-        # ✅ ИСПРАВЛЕНИЕ: создаем новый auto_reply_kwargs с replyId = meshtastic_msg_id
         auto_reply_kwargs = {}
         if meshtastic_msg_id:
-            auto_reply_kwargs['replyId'] = meshtastic_msg_id  # ID текущего сообщения!
+            auto_reply_kwargs['replyId'] = meshtastic_msg_id
         if channel_name:
             auto_reply_kwargs['channel'] = channel_name
 
@@ -1028,7 +1209,7 @@ class MeshTelegramBot:
         if is_private:
             reply = self._get_signal_reply(short_name, rssi, snr, self.private_suffix)
             logger.debug(f"Сигнал для private: RSSI={rssi}, SNR={snr}")
-            send_type = self._send_to_meshtastic(reply, auto_reply_kwargs, node_id)  # ✅ используем auto_reply_kwargs
+            send_type = self._send_to_meshtastic(reply, auto_reply_kwargs, node_id)
             if send_type:
                 logger.info(f"Отправлен ответ в личный канал: {reply} ({send_type}) -> {node_id}")
                 # Запись АВТООТВЕТА в файл (private)
@@ -1048,7 +1229,7 @@ class MeshTelegramBot:
                 reply = self._get_direct_reply(short_name, snr, rssi, self.general_suffix)
                 logger.warning(f"Хопы не определены, fallback на сигнал")
             
-            send_type = self._send_to_meshtastic(reply, auto_reply_kwargs)  # ✅ используем auto_reply_kwargs
+            send_type = self._send_to_meshtastic(reply, auto_reply_kwargs)
             if send_type:
                 logger.info(f"Отправлен ответ: {reply} (broadcast)")
                 # Запись АВТООТВЕТА в файл (general)
@@ -1060,7 +1241,7 @@ class MeshTelegramBot:
                 short_name, 
                 original_text, 
                 reply, 
-                meshtastic_msg_id,  # это правильный ID!
+                meshtastic_msg_id,
                 is_private
             )
 
@@ -1098,7 +1279,7 @@ class MeshTelegramBot:
                         logger.error(f"Ошибка проверки config.json: {e}")
                     last_config_check = now
 
-                # ✅ ИСПРАВЛЕНИЕ: проверка соединения и автопереподключение только если не было ручного отключения
+                # проверка соединения и автопереподключение только если не было ручного отключения
                 if not self.manual_disconnect and now - self.last_connection_check >= CONNECTION_CHECK_INTERVAL:
                     if not self._check_connection():
                         if self.is_connected:
