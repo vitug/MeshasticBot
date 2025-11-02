@@ -57,6 +57,7 @@ class MeshTelegramBot:
         self.private_suffix = ''
         self.telegram_token = None
         self.telegram_chat_id = None
+        self.telegram_timeout = 60  # Таймаут по умолчанию 60 секунд
         self.default_channel = None
         self.node_long_name = 'Node'  # Храним long_name в классе (fallback)
         self.config_mtime = 0
@@ -94,6 +95,7 @@ class MeshTelegramBot:
             self.private_suffix = self.config.get('private_suffix', '')
             self.telegram_token = self.config.get('telegram_token')
             self.telegram_chat_id = str(self.config.get('telegram_chat_id', '')) if self.config.get('telegram_chat_id') else None
+            self.telegram_timeout = self.config.get('telegram_timeout', 60)  # Загружаем таймаут, по умолчанию 60
             self.default_channel = self.config.get('default_channel')
             self.node_long_name = self.config.get('node_long_name', 'Node')  # Загружаем long_name из config
             self.config_mtime = os.path.getmtime('config.json')
@@ -107,7 +109,7 @@ class MeshTelegramBot:
             logger.info(f"Конфигурация загружена: IP={self.ip}, Port={self.port}, Keywords={self.keywords}, "
                         f"Private nodes={self.private_node_names}, General suffix='{self.general_suffix}', "
                         f"Private suffix='{self.private_suffix}', Node long_name='{self.node_long_name}', "
-                        f"Telegram: {'enabled' if self.telegram_token else 'disabled'}")
+                        f"Telegram: {'enabled' if self.telegram_token else 'disabled'}, Timeout={self.telegram_timeout}s")
         except FileNotFoundError:
             logger.error("Файл config.json не найден!")
             exit(1)
@@ -206,6 +208,7 @@ class MeshTelegramBot:
             self.private_suffix = new_config.get('private_suffix', '')
             self.default_channel = new_config.get('default_channel')
             self.node_long_name = new_config.get('node_long_name', 'Node')  # Перезагружаем long_name
+            self.telegram_timeout = new_config.get('telegram_timeout', 60)  # Перезагружаем таймаут
             
             new_telegram_token = new_config.get('telegram_token')
             new_telegram_chat_id = str(new_config.get('telegram_chat_id', '')) if new_config.get('telegram_chat_id') else None
@@ -216,7 +219,7 @@ class MeshTelegramBot:
                 self.telegram_chat_id = new_telegram_chat_id
             
             self.config_mtime = os.path.getmtime('config.json')
-            logger.info("Конфигурация перезагружена успешно (keywords, suffixes, private_nodes, node_long_name обновлены)")
+            logger.info("Конфигурация перезагружена успешно (keywords, suffixes, private_nodes, node_long_name, telegram_timeout обновлены)")
         except Exception as e:
             logger.error(f"Ошибка перезагрузки config.json: {e}")
 
@@ -645,6 +648,20 @@ class MeshTelegramBot:
             # Попытка запроса информации о нодах (не критично для подключения)
             try:
                 self.interface.requestNodeInfo()  # Запрос информации о нодах, включая локальную
+                except Exception as req_e:
+                    logger.warning(f"Не удалось запросить информацию о нодах: {req_e}. Ноды будут загружены автоматически.")
+
+                # Ожидание загрузки нод (до 30 сек max)
+                wait_start = time.time()
+                while time.time() - wait_start < 30:
+                    if self.interface.nodesByNum:  # Если хотя бы одна нода загружена
+                        logger.info(f"Ноды загружены: {len(self.interface.nodesByNum)} шт. Готово к работе.")
+                        self._scan_nodes()  # Обновляем node_map сразу
+                        break
+                    logger.debug("Ожидание загрузки нод...")
+                    time.sleep(2)
+                else:
+                    logger.warning("Таймаут ожидания нод. Автоответ на private может не работать сразу.")                
             except Exception as req_e:
                 logger.warning(f"Не удалось запросить информацию о нодах: {req_e}. Ноды будут загружены автоматически.")
             
@@ -754,6 +771,7 @@ class MeshTelegramBot:
 Имя ноды (long_name): {long_name}
 LoRa пресет: {preset_name}
 Channel num: {channel_num_name}  # Channel num (ранее freq_slot)
+Telegram timeout: {self.telegram_timeout}s
             """
             
             self.bot.reply_to(message, status_text)
@@ -1153,8 +1171,8 @@ Channel num: {channel_num_name}  # Channel num (ранее freq_slot)
         if self.bot:
             while True:
                 try:
-                    logger.info("Запуск Telegram polling...")
-                    self.bot.polling(none_stop=True, interval=0, timeout=20)
+                    logger.info(f"Запуск Telegram polling с таймаутом {self.telegram_timeout}s...")
+                    self.bot.polling(none_stop=True, interval=0, timeout=self.telegram_timeout)
                 except Exception as e:
                     logger.error(f"Ошибка Telegram polling: {e}", exc_info=True)
                     time.sleep(5)
@@ -1332,7 +1350,7 @@ Channel num: {channel_num_name}  # Channel num (ранее freq_slot)
         """Запуск бота: Telegram polling в фоне + основной цикл с автопереподключением."""
         print(f"🚀 Запуск Meshtastic Telegram Bot...")
         print(f"📡 Адрес Meshtastic: {self.ip}:{self.port}")
-        print(f"🤖 Telegram: {'включен' if self.bot else 'отключен'}")
+        print(f"🤖 Telegram: {'включен' if self.bot else 'отключен'} (timeout: {self.telegram_timeout}s)")
         print(f"📝 Node long_name из config: {self.node_long_name}")
 
         if self.bot:
