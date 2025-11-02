@@ -648,22 +648,20 @@ class MeshTelegramBot:
             # Попытка запроса информации о нодах (не критично для подключения)
             try:
                 self.interface.requestNodeInfo()  # Запрос информации о нодах, включая локальную
-                except Exception as req_e:
-                    logger.warning(f"Не удалось запросить информацию о нодах: {req_e}. Ноды будут загружены автоматически.")
-
-                # Ожидание загрузки нод (до 30 сек max)
-                wait_start = time.time()
-                while time.time() - wait_start < 30:
-                    if self.interface.nodesByNum:  # Если хотя бы одна нода загружена
-                        logger.info(f"Ноды загружены: {len(self.interface.nodesByNum)} шт. Готово к работе.")
-                        self._scan_nodes()  # Обновляем node_map сразу
-                        break
-                    logger.debug("Ожидание загрузки нод...")
-                    time.sleep(2)
-                else:
-                    logger.warning("Таймаут ожидания нод. Автоответ на private может не работать сразу.")                
             except Exception as req_e:
                 logger.warning(f"Не удалось запросить информацию о нодах: {req_e}. Ноды будут загружены автоматически.")
+
+            # Ожидание загрузки нод (до 30 сек max)
+            wait_start = time.time()
+            while time.time() - wait_start < 30:
+                if self.interface.nodesByNum:  # Если хотя бы одна нода загружена
+                    logger.info(f"Ноды загружены: {len(self.interface.nodesByNum)} шт. Готово к работе.")
+                    self._scan_nodes()  # Обновляем node_map сразу
+                    break
+                logger.debug("Ожидание загрузки нод...")
+                time.sleep(2)
+            else:
+                logger.warning("Таймаут ожидания нод. Автоответ на private может не работать сразу.")                
             
             return True
         except Exception as e:
