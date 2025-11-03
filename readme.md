@@ -107,6 +107,8 @@ This project is a Telegram bot for integrating with the Meshtastic network. The 
     ExecStart=/bin/bash -c 'source meshtastic_env/bin/activate && python mesh_bot.py'  # Если без env, уберите source
     Restart=always
     RestartSec=10
+	WatchdogSec=300
+	NotifyAccess=main
     StandardOutput=journal
     StandardError=journal
     

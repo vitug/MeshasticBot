@@ -22,6 +22,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+try:
+    from sdnotify import SystemdNotifier
+    HAS_SYSTEMD = True
+except ImportError:
+    SystemdNotifier = None
+    HAS_SYSTEMD = False
+    logger.warning("Модуль sdnotify не найден — watchdog пинги отключены")
+    
 # Подавляем DEBUG-логи от библиотек
 logging.getLogger('meshtastic').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
@@ -80,6 +88,12 @@ class MeshTelegramBot:
         self._init_meshtastic()
         self._init_telegram()
         self._setup_subscriptions()
+        
+        # Watchdog для systemd
+        self.last_watchdog_ping = time.time()
+        self.watchdog_interval = 60
+        self.notifier = SystemdNotifier() if HAS_SYSTEMD else None
+        self.has_systemd = HAS_SYSTEMD       
 
     # ==================== СЕРВИСНЫЕ МЕТОДЫ ====================
     
@@ -622,6 +636,40 @@ class MeshTelegramBot:
             logger.error(f"Ошибка обновления longName ноды: {e}", exc_info=True)
             return False, None, None
 
+    def _save_private_node_to_config(self, node_name):
+        """Сервисный метод: добавление ноды в private_node_names в config.json."""
+        if self.config is not None:
+            node_name_lower = node_name.lower()
+            
+            # Проверяем, нет ли уже в списке
+            if node_name_lower in self.private_node_names:
+                logger.debug(f"Нода '{node_name_lower}' уже в private_node_names")
+                return False
+            
+            # Добавляем в память
+            self.private_node_names.append(node_name_lower)
+            
+            # Обновляем config
+            if 'private_node_names' not in self.config:
+                self.config['private_node_names'] = []
+            
+            self.config['private_node_names'].append(node_name_lower)
+            
+            try:
+                with open('config.json', 'w', encoding='utf-8') as f:
+                    json.dump(self.config, f, indent=4, ensure_ascii=False)
+                logger.info(f"Нода '{node_name_lower}' добавлена в private_node_names и сохранена в config.json")
+                self.config_mtime = os.path.getmtime('config.json')
+                return True
+            except Exception as e:
+                logger.error(f"Ошибка сохранения private_node_names в config: {e}")
+                # Откатываем изменения в памяти при ошибке
+                self.private_node_names.remove(node_name_lower)
+                if node_name_lower in self.config.get('private_node_names', []):
+                    self.config['private_node_names'].remove(node_name_lower)
+                return False
+        return False
+        
     def _disconnect_meshtastic(self):
         """Сервисный метод: отключение от Meshtastic."""
         if self.interface:
@@ -645,30 +693,28 @@ class MeshTelegramBot:
             logger.info(f"Подключение к Meshtastic: {ip}:{port}")
             self.interface = TCPInterface(hostname=ip, portNumber=port, debugOut=None)
             self._setup_subscriptions()
-            time.sleep(2)  # Пауза для инициализации
+            
+            # Пауза для инициализации и автоматической загрузки нод
+            time.sleep(2)
+            
             self.is_connected = True
             logger.info(f"✓ Подключение к {ip}:{port} успешно!")
             print(f"✓ Подключение к {ip}:{port} успешно!")
             
-            # Попытка запроса информации о нодах (не критично для подключения)
-            try:
-                self.interface.requestNodeInfo()  # Запрос информации о нодах, включая локальную
-            except Exception as req_e:
-                logger.warning(f"Не удалось запросить информацию о нодах: {req_e}. Ноды будут загружены автоматически.")
-
-            # Ожидание загрузки нод (до 30 сек max)
+            # Ожидание автоматической загрузки нод (до 30 сек max)
             wait_start = time.time()
             while time.time() - wait_start < 30:
                 if self.interface.nodesByNum:  # Если хотя бы одна нода загружена
-                    logger.info(f"Ноды загружены: {len(self.interface.nodesByNum)} шт. Готово к работе.")
+                    logger.info(f"Ноды загружены автоматически: {len(self.interface.nodesByNum)} шт.")
                     self._scan_nodes()  # Обновляем node_map сразу
                     break
-                logger.debug("Ожидание загрузки нод...")
+                logger.debug("Ожидание автоматической загрузки нод...")
                 time.sleep(2)
             else:
-                logger.warning("Таймаут ожидания нод. Автоответ на private может не работать сразу.")                
+                logger.warning("Таймаут ожидания загрузки нод. Автоответ на private может не работать сразу.")
             
             return True
+            
         except Exception as e:
             logger.error(f"Ошибка подключения к Meshtastic {ip}:{port}: {e}", exc_info=True)
             self.interface = None
@@ -882,29 +928,42 @@ Telegram timeout: {self.telegram_timeout}s
                 return
 
             node_name = parts[1].lower()
+            text = parts[2]
+            
+            # Автоматическое добавление ноды в private_node_names
+            was_added = False
             if node_name not in self.private_node_names:
-                self.bot.reply_to(message, f"Нода '{node_name}' не в списке private_node_names. Доступные: {', '.join(self.private_node_names)}")
-                return
+                logger.info(f"Нода '{node_name}' не в списке private_node_names, добавляем автоматически...")
+                was_added = self._save_private_node_to_config(node_name)
 
+            # Проверяем наличие node_id в node_map
             node_id = self.node_map.get(node_name)
             if not node_id:
-                self.bot.reply_to(message, f"ID ноды '{node_name}' не найден. Подождите обновления node_map.")
+                # Даём подсказку, если нода неизвестна
+                available_nodes = [name for name in self.node_map.keys()]
+                hint = f"Известные ноды: {', '.join(available_nodes)}" if available_nodes else "Нет известных нод. Подождите обновления node_map."
+                self.bot.reply_to(message, f"❌ ID ноды '{node_name}' не найден в сети.\n{hint}")
                 return
 
-            text = parts[2]
             send_kwargs = {}
             
             # Отправка с разбивкой на части И записью в файл
             success, total_parts = self._send_multipart_to_meshtastic(text, send_kwargs, node_id, log_to_file=True)
             
             if success:
+                # Формируем сообщение с учётом автодобавления
+                status_msg = f"✓ Личное сообщение отправлено ноде '{node_name}'"
                 if total_parts > 1:
-                    self.bot.reply_to(message, f"✓ Личное сообщение отправлено ноде '{node_name}' в {total_parts} частях!")
-                else:
-                    self.bot.reply_to(message, f"✓ Личное сообщение отправлено ноде '{node_name}'!")
+                    status_msg += f" в {total_parts} частях"
+                status_msg += "!"
+                
+                if was_added:
+                    status_msg += f"\n📝 Нода '{node_name}' добавлена в private_node_names (автоматически)"
+                
+                self.bot.reply_to(message, status_msg)
             else:
                 self.bot.reply_to(message, f"✗ Ошибка отправки сообщения ноде '{node_name}'.")
-                
+                    
         except Exception as e:
             logger.error(f"Ошибка обработки /pm: {e}")
             self.bot.reply_to(message, f"Ошибка: {e}")
@@ -1384,7 +1443,7 @@ Telegram timeout: {self.telegram_timeout}s
 
         last_config_check = 0
         config_check_interval = 10
-        
+               
         try:
             logger.info("Запуск основного цикла с автопереподключением...")
             print("✓ Основной цикл запущен. Нажмите Ctrl+C для остановки.\n")
@@ -1417,6 +1476,15 @@ Telegram timeout: {self.telegram_timeout}s
                         self._scan_nodes()
                         self.last_node_scan = now
 
+                    # Пинг watchdog
+                    if self.notifier and now - self.last_watchdog_ping >= self.watchdog_interval:
+                        try:
+                            self.notifier.notify("WATCHDOG=1")
+                            self.last_watchdog_ping = now
+                            logger.debug("Watchdog ping отправлен")
+                        except Exception as wd_e:
+                            logger.error(f"Ошибка watchdog пинга: {wd_e}")
+                                      
                     time.sleep(1)
                 except Exception as loop_e:
                     logger.error(f"Ошибка в main loop: {loop_e}", exc_info=True)

@@ -1,0 +1,7 @@
+
+# Файл зависимостей для установки необходимых Python-модулей для MeshTelegramBot
+# Установка: pip install -r requirements.txt
+
+meshtastic>=2.3.0  # Библиотека для работы с Meshtastic (включает pubsub)
+pyTelegramBotAPI>=4.14.0  # Библиотека для Telegram-бота (telebot)
+sdnotify
