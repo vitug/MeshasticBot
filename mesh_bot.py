@@ -779,6 +779,11 @@ class MeshTelegramBot:
         """Инициализация Telegram бота."""
         if self.telegram_token:
             try:
+                # Set global timeout for all API calls (send_message, etc.) via apihelper   
+                from telebot import apihelper
+                apihelper.REMOTE_TIMEOUT = self.telegram_timeout  # Use your config value (default 60s)
+                logger.info(f"Telegram API timeout установлен: {self.telegram_timeout}s (via REMOTE_TIMEOUT)")
+                           
                 self.bot = telebot.TeleBot(self.telegram_token)
                 self._setup_telegram_handlers()
                 logger.info("Telegram бот инициализирован")
@@ -788,6 +793,20 @@ class MeshTelegramBot:
         else:
             self.bot = None
 
+    def _send_with_retry(self, *args, max_retries=3, **kwargs):
+        """Сервисный метод: отправка в Telegram с retry при timeout."""
+        for attempt in range(max_retries):
+            try:
+                return self.bot.send_message(*args, **kwargs)
+            except (requests.exceptions.ReadTimeout, telebot.apihelper.ApiException) as e:
+                if "timeout" in str(e).lower() and attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 5  # Exponential backoff: 5s, 10s, 15s
+                    logger.warning(f"Timeout на попытке {attempt + 1}/{max_retries}. Ждём {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    raise
+        return None
+    
     def _setup_telegram_handlers(self):
         """Настройка обработчиков для Telegram бота."""
         @self.bot.message_handler(commands=['connect'])
@@ -1191,11 +1210,14 @@ Telegram timeout: {self.telegram_timeout}s
                 telegram_text += signal_info
 
             # Отправка с reply_to_message_id если есть родительское сообщение
-            sent_msg = self.bot.send_message(
+            sent_msg = self._send_with_retry(
                 self.telegram_chat_id, 
                 telegram_text,
                 reply_to_message_id=telegram_parent_id if telegram_parent_id else None
             )
+            if not sent_msg:
+                logger.error("Failed to send to Telegram after retries")
+                return
             
             # Сохранение маппинга для будущих reply
             if meshtastic_msg_id:
