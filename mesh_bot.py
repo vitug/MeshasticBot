@@ -141,7 +141,7 @@ class MeshTelegramBot:
         os.makedirs(self.messages_dir, exist_ok=True)
         logger.info(f"Папка для логов сообщений: {self.messages_dir}")
 
-    def _log_message_to_file(self, message_type, short_name, original_text, rssi='unknown', snr='unknown', hop_count=None, is_private=False, to_id=None, is_outgoing=False, is_bot_reply=False):
+    def _log_message_to_file(self, message_type, short_name, original_text, rssi='unknown', snr='unknown', hop_count=None, hop_start=None, hop_limit=None, via_short_name=None, is_private=False, to_id=None, is_outgoing=False, is_bot_reply=False):
         """
         Сервисный метод: запись сообщения в соответствующий файл.
         
@@ -151,7 +151,10 @@ class MeshTelegramBot:
             original_text: текст сообщения
             rssi: уровень сигнала
             snr: отношение сигнал/шум
-            hop_count: количество хопов
+            hop_count: количество хопов (вычисленное)
+            hop_start: исходный лимит хопов
+            hop_limit: оставшийся лимит хопов
+            via_short_name: короткое имя via-ноды (промежуточной)
             is_private: приватное ли сообщение
             to_id: ID получателя (для исходящих)
             is_outgoing: исходящее ли сообщение (из Telegram)
@@ -172,9 +175,15 @@ class MeshTelegramBot:
         if not is_outgoing and not is_bot_reply:
             if snr != 'unknown' and rssi != 'unknown':
                 signal_info = f" (SNR: {snr}, RSSI: {rssi})"
+            if via_short_name:
+                via_info = f" via {via_short_name}"
+                signal_info = via_info if not signal_info else signal_info + via_info
             if hop_count and hop_count > 0:
                 hops_info = f" ({hop_count} hops)"
                 signal_info = hops_info if not signal_info else signal_info + hops_info
+            if hop_start is not None and hop_limit is not None:
+                hops_raw_info = f" (hop_start: {hop_start}, hop_limit: {hop_limit})"
+                signal_info = hops_raw_info if not signal_info else signal_info + hops_raw_info
         
         # Информация о получателе (для исходящих и автоответов)
         if is_outgoing or is_bot_reply:
@@ -406,13 +415,21 @@ class MeshTelegramBot:
             send_kwargs['channel'] = channel_name
         return send_kwargs
 
-    def _get_signal_reply(self, short_name, rssi, snr, suffix):
+    def _get_signal_reply(self, short_name, rssi, snr, suffix, via_short_name=None):
         """Сервисный метод: формирование ответа с сигналом (RSSI/SNR)."""
-        return f"{short_name} SNR: {snr}, RSSI: {rssi} {suffix}"
+        reply = f"{short_name} SNR: {snr}, RSSI: {rssi}"
+        if via_short_name:
+            reply += f" via {via_short_name}"
+        reply += f" {suffix}"
+        return reply
 
-    def _get_hops_reply(self, short_name, hop_count, suffix):
+    def _get_hops_reply(self, short_name, hop_count, suffix, via_short_name=None):
         """Сервисный метод: формирование ответа с количеством хопов."""
-        return f"{short_name} {hop_count} hops {suffix}"
+        reply = f"{short_name} {hop_count} hops"
+        if via_short_name:
+            reply += f" via {via_short_name}"
+        reply += f" {suffix}"
+        return reply
 
     def _get_direct_reply(self, short_name, snr, rssi, suffix):
         """Сервисный метод: формирование ответа для прямого приема (сигнал)."""
@@ -1251,7 +1268,7 @@ Telegram timeout: {self.telegram_timeout}s
             except:
                 pass
 
-    def _forward_to_telegram(self, meshtastic_msg_id, short_name, original_text, node_id, is_private, rssi, snr, hop_count, reply_id=None):
+    def _forward_to_telegram(self, meshtastic_msg_id, short_name, original_text, node_id, is_private, rssi, snr, hop_count, via_short_name=None, reply_id=None):
         """Метод для пересылки сообщения из Meshtastic в Telegram с поддержкой reply."""
         if not self.bot or not self.telegram_chat_id:
             return
@@ -1272,10 +1289,14 @@ Telegram timeout: {self.telegram_timeout}s
             telegram_text = prefix + original_text
 
             signal_info = ""
+            if via_short_name:
+                signal_info = f" via {via_short_name}"
             if hop_count is not None and hop_count > 0:
-                signal_info = f" ({hop_count} hops)"
+                hops_info = f" ({hop_count} hops)"
+                signal_info = hops_info if not signal_info else signal_info + hops_info
             elif rssi != 'unknown' and snr != 'unknown':
-                signal_info = f" (SNR: {snr}, RSSI: {rssi})"
+                snr_rssi_info = f" (SNR: {snr}, RSSI: {rssi})"
+                signal_info = snr_rssi_info if not signal_info else signal_info + snr_rssi_info
             if signal_info:
                 telegram_text += signal_info
 
@@ -1413,13 +1434,19 @@ Telegram timeout: {self.telegram_timeout}s
                 hop_count = hop_start - hop_limit
                 logger.debug(f"Вычислено hop_count: {hop_count}")
 
+            via_id = packet.get('via')
+            via_short_name = None
+            if via_id:
+                via_short_name, _ = self._get_node_info(via_id, interface)
+                logger.debug(f"VIA нода {via_id}: short_name={via_short_name}")
+
             send_kwargs = self._get_send_kwargs(reply_id, channel_name)
 
             # Запись ВХОДЯЩЕГО сообщения в файл
             if is_broadcast:
-                self._log_message_to_file('general', short_name, original_text, rssi, snr, hop_count, is_outgoing=False)
+                self._log_message_to_file('general', short_name, original_text, rssi, snr, hop_count, hop_start, hop_limit, via_short_name, is_outgoing=False)
             else:
-                self._log_message_to_file('private', short_name, original_text, rssi, snr, hop_count, to_id=to_id, is_outgoing=False)
+                self._log_message_to_file('private', short_name, original_text, rssi, snr, hop_count, hop_start, hop_limit, via_short_name, to_id=to_id, is_outgoing=False)
 
             forward_to_telegram = False
             if is_broadcast:
@@ -1438,6 +1465,7 @@ Telegram timeout: {self.telegram_timeout}s
                     rssi, 
                     snr, 
                     hop_count,
+                    via_short_name,
                     reply_id
                 )
 
@@ -1452,7 +1480,8 @@ Telegram timeout: {self.telegram_timeout}s
                     packet, 
                     channel_name, 
                     original_text, 
-                    meshtastic_msg_id
+                    meshtastic_msg_id,
+                    via_short_name
                 )
             else:
                 logger.debug(f"Ключевые слова не найдены в: '{original_text}'")
@@ -1462,7 +1491,7 @@ Telegram timeout: {self.telegram_timeout}s
         except Exception as e:
             logger.error(f"Ошибка обработки пакета: {e}", exc_info=True)
 
-    def _handle_auto_reply(self, is_private, short_name, node_id, send_kwargs, rssi, snr, packet, channel_name, original_text, meshtastic_msg_id):
+    def _handle_auto_reply(self, is_private, short_name, node_id, send_kwargs, rssi, snr, packet, channel_name, original_text, meshtastic_msg_id, via_short_name=None):
         """Метод для обработки автоматического ответа на ключевые слова."""
         if not self.interface or not self.is_connected:
             logger.warning("Нет активного подключения к Meshtastic, пропускаем автоответ")
@@ -1489,10 +1518,10 @@ Telegram timeout: {self.telegram_timeout}s
         suffix = self.private_suffix if is_private else self.general_suffix
         
         if hop_count is not None and hop_count > 0:
-            reply = self._get_hops_reply(short_name, hop_count, suffix)
+            reply = self._get_hops_reply(short_name, hop_count, suffix, via_short_name)
             logger.debug(f"Хопы для {'private' if is_private else 'broadcast'}: {hop_count}")
         else:
-            reply = self._get_signal_reply(short_name, rssi, snr, suffix)
+            reply = self._get_signal_reply(short_name, rssi, snr, suffix, via_short_name)
             logger.debug(f"Прямой {'private' if is_private else 'broadcast'}: сигнал RSSI={rssi}, SNR={snr}")
         
         if reply:
