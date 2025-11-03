@@ -73,6 +73,7 @@ class MeshTelegramBot:
         self.last_node_scan = 0
         self.node_scan_interval = 30
         self.messages_dir = 'messages_logs'
+        self.pending_messages = {}  # Хранение ожидающих подтверждения сообщений {chat_id: dict}
         
         # Флаги для автопереподключения
         self.is_connected = False
@@ -833,6 +834,63 @@ class MeshTelegramBot:
         def handle_telegram_message(message):
             self._handle_telegram_message(message)
 
+        @self.bot.callback_query_handler(func=lambda call: call.data and call.data.startswith(('confirm_send_', 'cancel_send_')))
+        def handle_confirmation(call):
+            self._handle_confirmation(call)
+
+    def _handle_confirmation(self, call):
+        """Обработчик подтверждения отправки сообщения."""
+        data = call.data
+        chat_id = str(call.message.chat.id)
+        self.bot.answer_callback_query(call.id)
+
+        if data.startswith('cancel_send_'):
+            orig_msg_id = int(data.split('_', 3)[2])
+            pending = self.pending_messages.get(chat_id)
+            if pending and pending['msg_id'] == orig_msg_id:
+                self.bot.edit_message_text("❌ Отправка отменена.", chat_id, call.message.message_id)
+                del self.pending_messages[chat_id]
+            else:
+                self.bot.answer_callback_query(call.id, "Сессия истекла.")
+            return
+
+        if data.startswith('confirm_send_'):
+            orig_msg_id = int(data.split('_', 3)[2])
+            pending = self.pending_messages.get(chat_id)
+            if not pending or pending['msg_id'] != orig_msg_id:
+                self.bot.answer_callback_query(call.id, "Сессия истекла.")
+                return
+
+            text = pending['text']
+            dest_node_id = pending['dest']
+            meshtastic_reply_id = pending['reply_id']
+            node_name = pending.get('node_name')
+
+            if not self.interface or not self.is_connected:
+                self.bot.edit_message_text("🔴 Не подключено к Meshtastic. Сообщение не отправлено.", chat_id, call.message.message_id)
+                del self.pending_messages[chat_id]
+                return
+
+            send_kwargs = {'replyId': meshtastic_reply_id} if meshtastic_reply_id else {}
+            if self.default_channel:
+                send_kwargs['channel'] = self.default_channel
+
+            success, total_parts = self._send_multipart_to_meshtastic(text, send_kwargs, dest_node_id, log_to_file=True)
+
+            if success:
+                if dest_node_id:
+                    target = f"личку ноде {node_name or dest_node_id}"
+                    parts_text = f" в {total_parts} частях" if total_parts > 1 else ""
+                    self.bot.edit_message_text(f"✓ Сообщение отправлено в {target}{parts_text}!", chat_id, call.message.message_id)
+                else:
+                    target = "общий канал"
+                    parts_text = f" в {total_parts} частях" if total_parts > 1 else ""
+                    self.bot.edit_message_text(f"✓ Сообщение отправлено в {target}{parts_text}!", chat_id, call.message.message_id)
+            else:
+                self.bot.edit_message_text(f"✗ Ошибка отправки (отправлено {total_parts} частей).", chat_id, call.message.message_id)
+
+            del self.pending_messages[chat_id]
+
     def _handle_status_command(self, message):
         """Обработчик команды /status - показывает состояние подключения."""
         try:
@@ -964,24 +1022,25 @@ Telegram timeout: {self.telegram_timeout}s
                 self.bot.reply_to(message, f"❌ ID ноды '{node_name}' не найден в сети.\n{hint}")
                 return
 
-            send_kwargs = {}
-            
-            # Отправка с разбивкой на части И записью в файл
-            success, total_parts = self._send_multipart_to_meshtastic(text, send_kwargs, node_id, log_to_file=True)
-            
-            if success:
-                # Формируем сообщение с учётом автодобавления
-                status_msg = f"✓ Личное сообщение отправлено ноде '{node_name}'"
-                if total_parts > 1:
-                    status_msg += f" в {total_parts} частях"
-                status_msg += "!"
-                
-                if was_added:
-                    status_msg += f"\n📝 Нода '{node_name}' добавлена в private_node_names (автоматически)"
-                
-                self.bot.reply_to(message, status_msg)
-            else:
-                self.bot.reply_to(message, f"✗ Ошибка отправки сообщения ноде '{node_name}'.")
+            # Подтверждение отправки
+            confirm_text = f"Вы уверены, что хотите отправить это приватное сообщение ноде '{node_name}' ({node_id})?\n\n{text}"
+            markup = types.InlineKeyboardMarkup()
+            markup.row(
+                types.InlineKeyboardButton("✅ Да, отправить в личку", callback_data=f"confirm_send_{message.message_id}"),
+                types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_send_{message.message_id}")
+            )
+            self.bot.reply_to(message, confirm_text, reply_markup=markup, parse_mode='Markdown')
+
+            # Сохраняем в pending
+            self.pending_messages[chat_id] = {
+                'text': text,
+                'dest': node_id,
+                'reply_id': None,
+                'msg_id': message.message_id,
+                'node_name': node_name
+            }
+
+            logger.info(f"Ожидание подтверждения для /pm: {text} -> {node_name} ({node_id})")
                     
         except Exception as e:
             logger.error(f"Ошибка обработки /pm: {e}")
@@ -1150,29 +1209,40 @@ Telegram timeout: {self.telegram_timeout}s
                 if meshtastic_reply_id:
                     logger.debug(f"Reply в Meshtastic: {meshtastic_reply_id}, private: {is_private_reply}, dest: {dest_node_id}")
 
-            send_kwargs = {'replyId': meshtastic_reply_id} if meshtastic_reply_id else {}
-            if self.default_channel:
-                send_kwargs['channel'] = self.default_channel
+            # Определяем node_name для подтверждения
+            node_name = None
+            if dest_node_id:
+                # Ищем имя по ID
+                for name, nid in self.node_map.items():
+                    if nid == dest_node_id:
+                        node_name = name
+                        break
+                if not node_name:
+                    node_name = str(dest_node_id)
 
-            text_bytes = self._calculate_text_bytes(text)
-            logger.info(f"Размер сообщения: {text_bytes} байт")
-            
-            # Отправка с разбивкой на части И записью в файл
-            success, total_parts = self._send_multipart_to_meshtastic(text, send_kwargs, dest_node_id, log_to_file=True)
-
-            if success:
-                if dest_node_id:
-                    if total_parts > 1:
-                        self.bot.reply_to(message, f"✓ Сообщение отправлено в личку ноде {dest_node_id} в {total_parts} частях!")
-                    else:
-                        self.bot.reply_to(message, f"✓ Сообщение отправлено в личку ноде {dest_node_id}!")
-                else:
-                    if total_parts > 1:
-                        self.bot.reply_to(message, f"✓ Сообщение отправлено в общий канал в {total_parts} частях!")
-                    else:
-                        self.bot.reply_to(message, "✓ Сообщение отправлено в общий канал!")
+            # Подтверждение отправки
+            if dest_node_id and node_name:
+                confirm_text = f"Вы уверены, что хотите отправить это приватное сообщение ноде '{node_name}'?\n\n{text}"
             else:
-                self.bot.reply_to(message, f"✗ Ошибка отправки сообщения (отправлено {total_parts} частей).")
+                confirm_text = f"Вы уверены, что хотите отправить это сообщение в общий чат?\n\n{text}"
+
+            markup = types.InlineKeyboardMarkup()
+            markup.row(
+                types.InlineKeyboardButton("✅ Да, отправить", callback_data=f"confirm_send_{message.message_id}"),
+                types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_send_{message.message_id}")
+            )
+            self.bot.reply_to(message, confirm_text, reply_markup=markup, parse_mode='Markdown')
+
+            # Сохраняем в pending
+            self.pending_messages[chat_id] = {
+                'text': text,
+                'dest': dest_node_id,
+                'reply_id': meshtastic_reply_id,
+                'msg_id': message.message_id,
+                'node_name': node_name
+            }
+
+            logger.info(f"Ожидание подтверждения для сообщения: {text} {'-> ' + str(dest_node_id) if dest_node_id else '(general)'}")
                 
         except Exception as e:
             logger.error(f"Ошибка обработки Telegram сообщения: {e}", exc_info=True)
@@ -1408,38 +1478,41 @@ Telegram timeout: {self.telegram_timeout}s
         if channel_name:
             auto_reply_kwargs['channel'] = channel_name
 
+        # Вычисляем hop_count
+        hop_start = packet.get('hopStart')
+        hop_limit = packet.get('hopLimit')
+        hop_count = None
+        if hop_start is not None and hop_limit is not None:
+            hop_count = hop_start - hop_limit
+
         reply = None
+        suffix = self.private_suffix if is_private else self.general_suffix
         
-        if is_private:
-            reply = self._get_signal_reply(short_name, rssi, snr, self.private_suffix)
-            logger.debug(f"Сигнал для private: RSSI={rssi}, SNR={snr}")
-            send_type = self._send_to_meshtastic(reply, auto_reply_kwargs, node_id)
-            if send_type:
-                logger.info(f"Отправлен ответ в личный канал: {reply} ({send_type}) -> {node_id}")
-                # Запись АВТООТВЕТА в файл (private)
-                self._log_message_to_file('private', short_name, reply, to_id=node_id, is_bot_reply=True)
+        if hop_count is not None and hop_count > 0:
+            reply = self._get_hops_reply(short_name, hop_count, suffix)
+            logger.debug(f"Хопы для {'private' if is_private else 'broadcast'}: {hop_count}")
         else:
-            hop_start = packet.get('hopStart')
-            hop_limit = packet.get('hopLimit')
-            if hop_start is not None and hop_limit is not None:
-                hop_count = hop_start - hop_limit
-                if hop_count > 0:
-                    reply = self._get_hops_reply(short_name, hop_count, self.general_suffix)
-                    logger.debug(f"Хопы для broadcast: {hop_count}")
-                else:
-                    reply = self._get_direct_reply(short_name, snr, rssi, self.general_suffix)
-                    logger.debug(f"Прямой broadcast: сигнал RSSI={rssi}, SNR={snr}")
-            else:
-                reply = self._get_direct_reply(short_name, snr, rssi, self.general_suffix)
-                logger.warning(f"Хопы не определены, fallback на сигнал")
-            
-            send_type = self._send_to_meshtastic(reply, auto_reply_kwargs)
-            if send_type:
-                logger.info(f"Отправлен ответ: {reply} (broadcast)")
-                # Запись АВТООТВЕТА в файл (general)
-                self._log_message_to_file('general', short_name, reply, is_bot_reply=True)
+            reply = self._get_signal_reply(short_name, rssi, snr, suffix)
+            logger.debug(f"Прямой {'private' if is_private else 'broadcast'}: сигнал RSSI={rssi}, SNR={snr}")
         
         if reply:
+            # Добавляем паузу перед отправкой автоответа
+            time.sleep(1)
+            logger.debug(f"Пауза 1 сек перед отправкой автоответа: '{reply[:30]}...'")        
+            
+            if is_private:
+                send_type = self._send_to_meshtastic(reply, auto_reply_kwargs, node_id)
+                if send_type:
+                    logger.info(f"Отправлен ответ в личный канал: {reply} ({send_type}) -> {node_id}")
+                    # Запись АВТООТВЕТА в файл (private)
+                    self._log_message_to_file('private', short_name, reply, to_id=node_id, is_bot_reply=True)
+            else:
+                send_type = self._send_to_meshtastic(reply, auto_reply_kwargs)
+                if send_type:
+                    logger.info(f"Отправлен ответ: {reply} (broadcast)")
+                    # Запись АВТООТВЕТА в файл (general)
+                    self._log_message_to_file('general', short_name, reply, is_bot_reply=True)
+            
             # передаем meshtastic_msg_id (ID исходного сообщения)
             self._forward_auto_reply_to_telegram(
                 short_name, 
