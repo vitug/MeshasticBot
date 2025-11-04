@@ -83,6 +83,10 @@ class MeshTelegramBot:
         self.reconnect_in_progress = False
         self.manual_disconnect = False
         
+        # Параметры фильтрации автоответов по хопам для общего канала
+        self.hop_filter_min = None
+        self.hop_filter_max = None
+        
         self._load_config()
         self._init_messages_dir()
 
@@ -115,6 +119,9 @@ class MeshTelegramBot:
             self.telegram_timeout = self.config.get('telegram_timeout', 60)  # Загружаем таймаут, по умолчанию 60
             self.default_channel = self.config.get('default_channel')
             self.node_long_name = self.config.get('node_long_name', 'Node')  # Загружаем long_name из config
+            hop_interval = self.config.get('hop_filter_interval', [None, None])
+            self.hop_filter_min = hop_interval[0] if isinstance(hop_interval, list) and len(hop_interval) >= 2 else None
+            self.hop_filter_max = hop_interval[1] if isinstance(hop_interval, list) and len(hop_interval) >= 2 else None
             self.config_mtime = os.path.getmtime('config.json')
             
             if not self.telegram_token:
@@ -126,6 +133,7 @@ class MeshTelegramBot:
             logger.info(f"Конфигурация загружена: IP={self.ip}, Port={self.port}, Keywords={self.keywords}, "
                         f"Private nodes={self.private_node_names}, General suffix='{self.general_suffix}', "
                         f"Private suffix='{self.private_suffix}', Node long_name='{self.node_long_name}', "
+                        f"Hop filter: [{self.hop_filter_min}, {self.hop_filter_max}], "
                         f"Telegram: {'enabled' if self.telegram_token else 'disabled'}, Timeout={self.telegram_timeout}s")
         except FileNotFoundError:
             logger.error("Файл config.json не найден!")
@@ -235,6 +243,9 @@ class MeshTelegramBot:
             self.default_channel = new_config.get('default_channel')
             self.node_long_name = new_config.get('node_long_name', 'Node')  # Перезагружаем long_name
             self.telegram_timeout = new_config.get('telegram_timeout', 60)  # Перезагружаем таймаут
+            hop_interval = new_config.get('hop_filter_interval', [None, None])
+            self.hop_filter_min = hop_interval[0] if isinstance(hop_interval, list) and len(hop_interval) >= 2 else None
+            self.hop_filter_max = hop_interval[1] if isinstance(hop_interval, list) and len(hop_interval) >= 2 else None
             
             new_telegram_token = new_config.get('telegram_token')
             new_telegram_chat_id = str(new_config.get('telegram_chat_id', '')) if new_config.get('telegram_chat_id') else None
@@ -245,7 +256,7 @@ class MeshTelegramBot:
                 self.telegram_chat_id = new_telegram_chat_id
             
             self.config_mtime = os.path.getmtime('config.json')
-            logger.info("Конфигурация перезагружена успешно (keywords, suffixes, private_nodes, node_long_name, telegram_timeout обновлены)")
+            logger.info("Конфигурация перезагружена успешно (keywords, suffixes, private_nodes, node_long_name, telegram_timeout, hop_filter_interval обновлены)")
         except Exception as e:
             logger.error(f"Ошибка перезагрузки config.json: {e}")
 
@@ -926,6 +937,8 @@ class MeshTelegramBot:
             # Получаем текущее имя ноды, пресет и channel_num
             long_name, preset_name, channel_num_name = self._get_current_node_info()
             
+            hop_filter_text = f"[{self.hop_filter_min}, {self.hop_filter_max}]" if self.hop_filter_min is not None and self.hop_filter_max is not None else "отключена"
+            
             status_text = f"""📊 Статус Meshtastic бота:
             
 Подключение: {status}
@@ -934,6 +947,7 @@ class MeshTelegramBot:
 Известных нод: {nodes_count}
 Приватных нод: {len(self.private_node_names)}
 Ключевых слов: {len(self.keywords)}
+Фильтр автоответов (hops): {hop_filter_text}
 Имя ноды (длинное): {long_name}
 LoRa пресет: {preset_name}
 Слот частоты: {channel_num_name}
@@ -1527,6 +1541,20 @@ Telegram timeout: {self.telegram_timeout}s
             logger.debug(f"Прямой {'private' if is_private else 'broadcast'}: сигнал RSSI={rssi}, SNR={snr}")
         
         if reply:
+            # Фильтрация автоответов для общего канала по интервалу хопов
+            if not is_private and hop_count is not None and self.hop_filter_min is not None and self.hop_filter_max is not None:
+                if self.hop_filter_min <= hop_count <= self.hop_filter_max:
+                    logger.info(f"Автоответ пропущен для общего канала: hop_count={hop_count} в интервале [{self.hop_filter_min}, {self.hop_filter_max}]")
+                    # Пересылаем уведомление в Telegram, но не отправляем в Meshtastic
+                    self._forward_auto_reply_to_telegram(
+                        short_name, 
+                        original_text, 
+                        f"[FILTERED] {reply}", 
+                        meshtastic_msg_id,
+                        is_private
+                    )
+                    return
+            
             # Добавляем паузу перед отправкой автоответа
             time.sleep(1)
             logger.debug(f"Пауза 1 сек перед отправкой автоответа: '{reply[:30]}...'")        
@@ -1557,10 +1585,12 @@ Telegram timeout: {self.telegram_timeout}s
     
     def run(self):
         """Запуск бота: Telegram polling в фоне + основной цикл с автопереподключением."""
-        print(f"🚀 Запуск Meshtastic Telegram Bot...")
-        print(f"📡 Адрес Meshtastic: {self.ip}:{self.port}")
-        print(f"🤖 Telegram: {'включен' if self.bot else 'отключен'} (timeout: {self.telegram_timeout}s)")
-        print(f"📝 Node long_name из config: {self.node_long_name}")
+        logger.info(f"🚀 Запуск Meshtastic Telegram Bot...")
+        logger.info(f"📡 Адрес Meshtastic: {self.ip}:{self.port}")
+        logger.info(f"🤖 Telegram: {'включен' if self.bot else 'отключен'} (timeout: {self.telegram_timeout}s)")
+        logger.info(f"📝 Node long_name из config: {self.node_long_name}")
+        hop_filter_text = f"[{self.hop_filter_min}, {self.hop_filter_max}]" if self.hop_filter_min is not None and self.hop_filter_max is not None else "отключена"
+        logger.info(f"🔧 Фильтр автоответов (hops): {hop_filter_text}")
 
         if self.bot:
             telegram_thread = threading.Thread(target=self._start_telegram_polling, daemon=True)
