@@ -11,6 +11,7 @@ import threading
 import os
 from collections import OrderedDict
 import re
+import requests
 
 # Настройка логирования в файл
 logging.basicConfig(
@@ -817,6 +818,7 @@ class MeshTelegramBot:
             try:
                 return self.bot.send_message(*args, **kwargs)
             except (requests.exceptions.ReadTimeout, telebot.apihelper.ApiException) as e:
+                logger.warning(f"Timeout/API error on attempt {attempt + 1}: {str(e)}")
                 if "timeout" in str(e).lower() and attempt < max_retries - 1:
                     wait_time = (attempt + 1) * 5  # Exponential backoff: 5s, 10s, 15s
                     logger.warning(f"Timeout на попытке {attempt + 1}/{max_retries}. Ждём {wait_time}s...")
