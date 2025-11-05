@@ -455,7 +455,7 @@ class MeshTelegramBot:
         try:
             # Пробуем heartbeat для провокации ошибки, если сокет мёртв
             self.interface.sendHeartbeat()
-            _ = self.interface.nodesByNum  # Дополнительная проверка
+            _ = self.interface.nodesByNum # Дополнительная проверка
             return True
         except (socket.error, BrokenPipeError, ConnectionResetError, OSError) as e:
             logger.warning(f"Сетевая ошибка в check_connection: {e} (тип: {type(e).__name__})")
@@ -539,7 +539,7 @@ class MeshTelegramBot:
                         # Личное сообщение
                         self._log_message_to_file(
                             'private',
-                            None,  # short_name не нужен для исходящих
+                            None, # short_name не нужен для исходящих
                             part,
                             to_id=node_id,
                             is_outgoing=True
@@ -573,13 +573,11 @@ class MeshTelegramBot:
     def _get_current_node_info(self):
         """Вспомогательный метод: получение текущего long_name, modem_preset и channel_num."""
         if not self.interface or not self.is_connected:
-            return self.node_long_name, "Не подключено", "Не подключено"  # Fallback на config для long_name
-
+            return self.node_long_name, "Не подключено", "Не подключено" # Fallback на config для long_name
         try:
             # long_name всегда из config
             long_name = self.node_long_name
             logger.debug(f"Node long_name loaded from config: '{long_name}'")
-
             # Получаем modem_preset (LoRa config)
             local_node = self.interface.localNode
             if local_node and local_node.localConfig and local_node.localConfig.lora:
@@ -604,11 +602,10 @@ class MeshTelegramBot:
             else:
                 preset_name = "Не загружено (запросите /set_preset для загрузки)"
                 channel_num_name = "Не загружено"
-
             return long_name, preset_name, channel_num_name
         except Exception as e:
             logger.error(f"Ошибка получения node info: {e}")
-            return self.node_long_name, "Ошибка", "Ошибка"  # Fallback на config
+            return self.node_long_name, "Ошибка", "Ошибка" # Fallback на config
 
     def _update_node_name_with_preset(self, preset_abbr, slot):
         """
@@ -629,7 +626,6 @@ class MeshTelegramBot:
             if not local_node:
                 logger.warning("localNode не доступен, пропускаем обновление имени")
                 return False, None, None
-
             # Базовое имя из config (вместо чтения из Meshtastic)
             current_long_name = self.node_long_name
             logger.debug(f"Текущее longName из config: '{current_long_name}', shortName не изменяется")
@@ -648,7 +644,7 @@ class MeshTelegramBot:
             # Ограничение: longName до 40 символов
             if len(new_long_name) > 40:
                 # Обрезаем базовое имя
-                max_base_len = 40 - len(new_preset_tag) - 1  # -1 для пробела
+                max_base_len = 40 - len(new_preset_tag) - 1 # -1 для пробела
                 base_long_name = base_long_name[:max_base_len]
                 new_long_name = f"{base_long_name} {new_preset_tag}"
             
@@ -734,9 +730,9 @@ class MeshTelegramBot:
             # Ожидание автоматической загрузки нод (до 30 сек max)
             wait_start = time.time()
             while time.time() - wait_start < 30:
-                if self.interface.nodesByNum:  # Если хотя бы одна нода загружена
+                if self.interface.nodesByNum: # Если хотя бы одна нода загружена
                     logger.info(f"Ноды загружены автоматически: {len(self.interface.nodesByNum)} шт.")
-                    self._scan_nodes()  # Обновляем node_map сразу
+                    self._scan_nodes() # Обновляем node_map сразу
                     break
                 logger.debug("Ожидание автоматической загрузки нод...")
                 time.sleep(2)
@@ -764,7 +760,7 @@ class MeshTelegramBot:
         now = time.time()
         # Фикс overflow: int(exponent), cap на 0 и max 10 (2^10=1024 сек ~17 мин)
         exponent = max(0, int((now - self.last_reconnect_attempt) // 60))
-        backoff = min(1 << min(exponent, 10), 300)  # Битовый сдвиг для int-математики (без pow)
+        backoff = min(1 << min(exponent, 10), 300) # Битовый сдвиг для int-математики (без pow)
         logger.debug(f"Backoff calc: exponent={exponent}, backoff={backoff}s")
         
         if now - self.last_reconnect_attempt < backoff:
@@ -809,11 +805,11 @@ class MeshTelegramBot:
         """Инициализация Telegram бота."""
         if self.telegram_token:
             try:
-                # Set global timeout for all API calls (send_message, etc.) via apihelper   
+                # Set global timeout for all API calls (send_message, etc.) via apihelper
                 from telebot import apihelper
-                apihelper.REMOTE_TIMEOUT = self.telegram_timeout  # Use your config value (default 60s)
+                apihelper.REMOTE_TIMEOUT = self.telegram_timeout # Use your config value (default 60s)
                 logger.info(f"Telegram API timeout установлен: {self.telegram_timeout}s (via REMOTE_TIMEOUT)")
-                           
+                              
                 self.bot = telebot.TeleBot(self.telegram_token)
                 self._setup_telegram_handlers()
                 logger.info("Telegram бот инициализирован")
@@ -831,95 +827,105 @@ class MeshTelegramBot:
             except (requests.exceptions.ReadTimeout, telebot.apihelper.ApiException) as e:
                 logger.warning(f"Timeout/API error on attempt {attempt + 1}: {str(e)}")
                 if "timeout" in str(e).lower() and attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 5  # Exponential backoff: 5s, 10s, 15s
+                    wait_time = (attempt + 1) * 5 # Exponential backoff: 5s, 10s, 15s
                     logger.warning(f"Timeout на попытке {attempt + 1}/{max_retries}. Ждём {wait_time}s...")
                     time.sleep(wait_time)
                 else:
                     raise
         return None
     
+    def _answer_callback_with_retry(self, callback_query_id, max_retries=3):
+        """Сервисный метод: ответ на callback query с retry при timeout."""
+        for attempt in range(max_retries):
+            try:
+                self.bot.answer_callback_query(callback_query_id)
+                return True
+            except (requests.exceptions.ReadTimeout, telebot.apihelper.ApiException) as e:
+                logger.warning(f"Timeout/API error answering callback {callback_query_id} on attempt {attempt + 1}: {str(e)}")
+                if "timeout" in str(e).lower() and attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 5  # Exponential backoff: 5s, 10s, 15s
+                    logger.warning(f"Timeout на попытке {attempt + 1}/{max_retries}. Ждём {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"Failed to answer callback {callback_query_id} after {max_retries} retries")
+                    return False
+        return False
+   
     def _setup_telegram_handlers(self):
         """Настройка обработчиков для Telegram бота."""
         @self.bot.message_handler(commands=['connect'])
         def handle_connect(message):
             self._handle_connect_command(message)
-
         @self.bot.message_handler(commands=['disconnect'])
         def handle_disconnect(message):
             self._handle_disconnect_command(message)
-
         @self.bot.message_handler(commands=['pm'])
         def handle_pm(message):
             self._handle_pm_command(message)
-
         @self.bot.message_handler(commands=['status'])
         def handle_status(message):
             self._handle_status_command(message)
-
         @self.bot.message_handler(commands=['set_preset'])
         def handle_set_preset(message):
             self._handle_set_preset_command(message)
-
         @self.bot.message_handler(func=lambda message: True)
         def handle_telegram_message(message):
             self._handle_telegram_message(message)
-
         @self.bot.callback_query_handler(func=lambda call: call.data and call.data.startswith(('confirm_send_', 'cancel_send_')))
         def handle_confirmation(call):
             self._handle_confirmation(call)
 
     def _handle_confirmation(self, call):
         """Обработчик подтверждения отправки сообщения."""
-        data = call.data
-        chat_id = str(call.message.chat.id)
-        self.bot.answer_callback_query(call.id)
-
-        if data.startswith('cancel_send_'):
-            orig_msg_id = int(data.split('_', 3)[2])
-            pending = self.pending_messages.get(chat_id)
-            if pending and pending['msg_id'] == orig_msg_id:
-                self.bot.edit_message_text("❌ Отправка отменена.", chat_id, call.message.message_id)
-                del self.pending_messages[chat_id]
-            else:
-                self.bot.answer_callback_query(call.id, "Сессия истекла.")
-            return
-
-        if data.startswith('confirm_send_'):
-            orig_msg_id = int(data.split('_', 3)[2])
-            pending = self.pending_messages.get(chat_id)
-            if not pending or pending['msg_id'] != orig_msg_id:
-                self.bot.answer_callback_query(call.id, "Сессия истекла.")
-                return
-
-            text = pending['text']
-            dest_node_id = pending['dest']
-            meshtastic_reply_id = pending['reply_id']
-            node_name = pending.get('node_name')
-
-            if not self.interface or not self.is_connected:
-                self.bot.edit_message_text("🔴 Не подключено к Meshtastic. Сообщение не отправлено.", chat_id, call.message.message_id)
-                del self.pending_messages[chat_id]
-                return
-
-            send_kwargs = {'replyId': meshtastic_reply_id} if meshtastic_reply_id else {}
-            if self.default_channel:
-                send_kwargs['channel'] = self.default_channel
-
-            success, total_parts = self._send_multipart_to_meshtastic(text, send_kwargs, dest_node_id, log_to_file=True)
-
-            if success:
-                if dest_node_id:
-                    target = f"личку ноде {node_name or dest_node_id}"
-                    parts_text = f" в {total_parts} частях" if total_parts > 1 else ""
-                    self.bot.edit_message_text(f"✓ Сообщение отправлено в {target}{parts_text}!", chat_id, call.message.message_id)
+        try:
+            # Добавляем обработку исключений для answer_callback_query
+            if not self._answer_callback_with_retry(call.id):
+                logger.warning(f"Продолжаем обработку без ответа на callback {call.id}")
+            
+            data = call.data
+            chat_id = str(call.message.chat.id)
+            if data.startswith('cancel_send_'):
+                orig_msg_id = int(data.split('_', 3)[2])
+                pending = self.pending_messages.get(chat_id)
+                if pending and pending['msg_id'] == orig_msg_id:
+                    self.bot.edit_message_text("❌ Отправка отменена.", chat_id, call.message.message_id)
+                    del self.pending_messages[chat_id]
                 else:
-                    target = "общий канал"
-                    parts_text = f" в {total_parts} частях" if total_parts > 1 else ""
-                    self.bot.edit_message_text(f"✓ Сообщение отправлено в {target}{parts_text}!", chat_id, call.message.message_id)
-            else:
-                self.bot.edit_message_text(f"✗ Ошибка отправки (отправлено {total_parts} частей).", chat_id, call.message.message_id)
-
-            del self.pending_messages[chat_id]
+                    # Попытка ответить на callback, даже если сессия истекла
+                    self._answer_callback_with_retry(call.id, max_retries=1)
+                return
+            if data.startswith('confirm_send_'):
+                orig_msg_id = int(data.split('_', 3)[2])
+                pending = self.pending_messages.get(chat_id)
+                if not pending or pending['msg_id'] != orig_msg_id:
+                    self._answer_callback_with_retry(call.id, max_retries=1)
+                    return
+                text = pending['text']
+                dest_node_id = pending['dest']
+                meshtastic_reply_id = pending['reply_id']
+                node_name = pending.get('node_name')
+                if not self.interface or not self.is_connected:
+                    self.bot.edit_message_text("🔴 Не подключено к Meshtastic. Сообщение не отправлено.", chat_id, call.message.message_id)
+                    del self.pending_messages[chat_id]
+                    return
+                send_kwargs = {'replyId': meshtastic_reply_id} if meshtastic_reply_id else {}
+                if self.default_channel:
+                    send_kwargs['channel'] = self.default_channel
+                success, total_parts = self._send_multipart_to_meshtastic(text, send_kwargs, dest_node_id, log_to_file=True)
+                if success:
+                    if dest_node_id:
+                        target = f"личку ноде {node_name or dest_node_id}"
+                        parts_text = f" в {total_parts} частях" if total_parts > 1 else ""
+                        self.bot.edit_message_text(f"✓ Сообщение отправлено в {target}{parts_text}!", chat_id, call.message.message_id)
+                    else:
+                        target = "общий канал"
+                        parts_text = f" в {total_parts} частях" if total_parts > 1 else ""
+                        self.bot.edit_message_text(f"✓ Сообщение отправлено в {target}{parts_text}!", chat_id, call.message.message_id)
+                else:
+                    self.bot.edit_message_text(f"✗ Ошибка отправки (отправлено {total_parts} частей).", chat_id, call.message.message_id)
+                del self.pending_messages[chat_id]
+        except Exception as e:
+            logger.error(f"Ошибка обработки подтверждения: {e}", exc_info=True)
 
     def _handle_status_command(self, message):
         """Обработчик команды /status - показывает состояние подключения."""
@@ -928,7 +934,6 @@ class MeshTelegramBot:
             if self.telegram_chat_id and chat_id != self.telegram_chat_id:
                 self.bot.reply_to(message, "Доступ запрещён для этого чата.")
                 return
-
             status = "🟢 Подключено" if self.is_connected else "🔴 Отключено"
             # ✅ Показываем режим автопереподключения
             auto_reconnect = "❌ Отключено (ручное отключение)" if self.manual_disconnect else "✅ Включено"
@@ -966,7 +971,6 @@ Telegram timeout: {self.telegram_timeout}s
             if self.telegram_chat_id and chat_id != self.telegram_chat_id:
                 self.bot.reply_to(message, "Доступ запрещён для этого чата.")
                 return
-
             parts = message.text.split()
             if len(parts) == 1:
                 ip = self.ip
@@ -988,7 +992,6 @@ Telegram timeout: {self.telegram_timeout}s
             else:
                 self.bot.reply_to(message, "Использование: /connect [ip:port]")
                 return
-
             # сбрасываем флаг ручного отключения при команде /connect
             self.manual_disconnect = False
             logger.info("Сброшен флаг manual_disconnect (пользователь вызвал /connect)")
@@ -1009,7 +1012,6 @@ Telegram timeout: {self.telegram_timeout}s
             if self.telegram_chat_id and chat_id != self.telegram_chat_id:
                 self.bot.reply_to(message, "Доступ запрещён для этого чата.")
                 return
-
             # устанавливаем флаг ручного отключения
             self.manual_disconnect = True
             logger.info("Установлен флаг manual_disconnect (пользователь вызвал /disconnect)")
@@ -1027,16 +1029,13 @@ Telegram timeout: {self.telegram_timeout}s
             if self.telegram_chat_id and chat_id != self.telegram_chat_id:
                 self.bot.reply_to(message, "Доступ запрещён для этого чата.")
                 return
-
             if not self.interface or not self.is_connected:
                 self.bot.reply_to(message, "🔴 Не подключено к Meshtastic. Используйте /connect")
                 return
-
             parts = message.text.split(maxsplit=2)
             if len(parts) < 3:
                 self.bot.reply_to(message, "Использование: /pm <node_name> <text>")
                 return
-
             node_name = parts[1].lower()
             text = parts[2]
             
@@ -1045,7 +1044,6 @@ Telegram timeout: {self.telegram_timeout}s
             if node_name not in self.private_node_names:
                 logger.info(f"Нода '{node_name}' не в списке private_node_names, добавляем автоматически...")
                 was_added = self._save_private_node_to_config(node_name)
-
             # Проверяем наличие node_id в node_map
             node_id = self.node_map.get(node_name)
             if not node_id:
@@ -1054,7 +1052,6 @@ Telegram timeout: {self.telegram_timeout}s
                 hint = f"Известные ноды: {', '.join(available_nodes)}" if available_nodes else "Нет известных нод. Подождите обновления node_map."
                 self.bot.reply_to(message, f"❌ ID ноды '{node_name}' не найден в сети.\n{hint}")
                 return
-
             # Подтверждение отправки
             confirm_text = f"Вы уверены, что хотите отправить это приватное сообщение ноде '{node_name}' ({node_id})?\n\n{text}"
             markup = types.InlineKeyboardMarkup()
@@ -1063,7 +1060,6 @@ Telegram timeout: {self.telegram_timeout}s
                 types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_send_{message.message_id}")
             )
             self.bot.reply_to(message, confirm_text, reply_markup=markup, parse_mode='Markdown')
-
             # Сохраняем в pending
             self.pending_messages[chat_id] = {
                 'text': text,
@@ -1072,9 +1068,8 @@ Telegram timeout: {self.telegram_timeout}s
                 'msg_id': message.message_id,
                 'node_name': node_name
             }
-
             logger.info(f"Ожидание подтверждения для /pm: {text} -> {node_name} ({node_id})")
-                    
+                  
         except Exception as e:
             logger.error(f"Ошибка обработки /pm: {e}")
             self.bot.reply_to(message, f"Ошибка: {e}")
@@ -1086,15 +1081,12 @@ Telegram timeout: {self.telegram_timeout}s
             if self.telegram_chat_id and chat_id != self.telegram_chat_id:
                 self.bot.reply_to(message, "❌ Доступ запрещён для этого чата.")
                 return
-
             if not self.interface or not self.is_connected:
                 self.bot.reply_to(message, "🔴 Не подключено к Meshtastic. Используйте /connect.")
                 return
-
             parts = message.text.split()
             if len(parts) != 3:
                 help_text = """❌ Использование: /set_preset <preset> <slot>
-
 Примеры:
 • /set_preset longfast 0
 • /set_preset mediumslow 1
@@ -1113,7 +1105,6 @@ Telegram timeout: {self.telegram_timeout}s
 После установки: перезагрузите устройство или переподключите бота."""
                 self.bot.reply_to(message, help_text)
                 return
-
             preset_name = parts[1].lower()
             
             try:
@@ -1121,11 +1112,9 @@ Telegram timeout: {self.telegram_timeout}s
             except ValueError:
                 self.bot.reply_to(message, "❌ Слот должен быть числом (0-7).")
                 return
-
             if slot < 0 or slot > 7:
                 self.bot.reply_to(message, "❌ Слот должен быть от 0 до 7.")
                 return
-
             # Маппинг пресетов на enum И сокращения
             preset_info = {
                 'longfast': {'enum': config_pb2.Config.LoRaConfig.ModemPreset.LONG_FAST, 'abbr': 'LF', 'display': 'Long Fast'},
@@ -1138,15 +1127,12 @@ Telegram timeout: {self.telegram_timeout}s
                 'longmoderate': {'enum': config_pb2.Config.LoRaConfig.ModemPreset.LONG_MODERATE, 'abbr': 'LM', 'display': 'Long Moderate'},
                 'shortturbo': {'enum': config_pb2.Config.LoRaConfig.ModemPreset.SHORT_TURBO, 'abbr': 'ST', 'display': 'Short Turbo'},
             }
-
             if preset_name not in preset_info:
                 self.bot.reply_to(message, "❌ Неизвестный пресет. Используйте /set_preset без параметров для справки.")
                 return
-
             modem_config = preset_info[preset_name]['enum']
             preset_abbr = preset_info[preset_name]['abbr']
             preset_display_name = preset_info[preset_name]['display']
-
             # Установка глобального пресета LoRa
             lora_write_success = False
             old_preset = None
@@ -1165,7 +1151,7 @@ Telegram timeout: {self.telegram_timeout}s
                 logger.info(f"Новый пресет установлен локально: {modem_config}")
                 
                 # Установка channel_num в LoRa config (ранее freq_slot)
-                local_config.lora.channel_num = slot  # 0-7 для frequency hopping/offset
+                local_config.lora.channel_num = slot # 0-7 для frequency hopping/offset
                 logger.info(f"Channel num установлен локально: {slot}")
                 
                 lora_write_success = local_node.writeConfig("lora")
@@ -1177,7 +1163,6 @@ Telegram timeout: {self.telegram_timeout}s
             except Exception as e:
                 logger.error(f"Ошибка установки глобального пресета: {e}")
                 lora_write_success = False
-
             # Обновляем longName ноды с пресетом (shortName не трогаем)
             name_success, old_name, new_name = self._update_node_name_with_preset(preset_abbr, slot)
             
@@ -1193,12 +1178,10 @@ Telegram timeout: {self.telegram_timeout}s
 {slot_status}
 ℹ️ ShortName остается без изменений
 🔄 Слот {slot}
-
 ⚠️ Для применения изменений:
 1. **Перезагрузите устройство** (обязательно для LoRa пресетов)
 2. Переподключите бота (/disconnect + /connect)
 3. Проверьте в Meshtastic app (Settings > Radio Configuration > LoRa)
-
 Если запись не удалась, попробуйте вручную в приложении."""
             
             self.bot.reply_to(message, response_text, parse_mode='Markdown')
@@ -1216,22 +1199,17 @@ Telegram timeout: {self.telegram_timeout}s
                 self._save_chat_id_to_config(chat_id)
                 self.bot.reply_to(message, f"Привет! Ваш chat_id: {chat_id}. Теперь бот активен для этого чата.")
                 return
-
             if message.text and message.text.startswith('/'):
                 return
-
             if chat_id != self.telegram_chat_id:
                 logger.debug(f"Сообщение из другого чата {chat_id}, игнорируем")
                 self.bot.reply_to(message, "Этот бот настроен для другого чата.")
                 return
-
             text = message.text
             logger.info(f"Получено сообщение из Telegram: '{text}' от {message.from_user.username} (msg_id: {message.message_id})")
-
             if not self.interface or not self.is_connected:
                 self.bot.reply_to(message, "🔴 Не подключено к Meshtastic. Используйте /connect")
                 return
-
             meshtastic_reply_id = None
             dest_node_id = None
             is_private_reply = False
@@ -1241,7 +1219,6 @@ Telegram timeout: {self.telegram_timeout}s
                 meshtastic_reply_id, dest_node_id, is_private_reply = self._find_reply_info(telegram_parent_id)
                 if meshtastic_reply_id:
                     logger.debug(f"Reply в Meshtastic: {meshtastic_reply_id}, private: {is_private_reply}, dest: {dest_node_id}")
-
             # Определяем node_name для подтверждения
             node_name = None
             if dest_node_id:
@@ -1252,20 +1229,17 @@ Telegram timeout: {self.telegram_timeout}s
                         break
                 if not node_name:
                     node_name = str(dest_node_id)
-
             # Подтверждение отправки
             if dest_node_id and node_name:
                 confirm_text = f"Вы уверены, что хотите отправить это приватное сообщение ноде '{node_name}'?\n\n{text}"
             else:
                 confirm_text = f"Вы уверены, что хотите отправить это сообщение в общий чат?\n\n{text}"
-
             markup = types.InlineKeyboardMarkup()
             markup.row(
                 types.InlineKeyboardButton("✅ Да, отправить", callback_data=f"confirm_send_{message.message_id}"),
                 types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_send_{message.message_id}")
             )
             self.bot.reply_to(message, confirm_text, reply_markup=markup, parse_mode='Markdown')
-
             # Сохраняем в pending
             self.pending_messages[chat_id] = {
                 'text': text,
@@ -1274,7 +1248,6 @@ Telegram timeout: {self.telegram_timeout}s
                 'msg_id': message.message_id,
                 'node_name': node_name
             }
-
             logger.info(f"Ожидание подтверждения для сообщения: {text} {'-> ' + str(dest_node_id) if dest_node_id else '(general)'}")
                 
         except Exception as e:
