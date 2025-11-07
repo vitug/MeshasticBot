@@ -193,6 +193,11 @@ class MeshTelegramBot:
             if hop_start is not None and hop_limit is not None:
                 hops_raw_info = f" (hop_start: {hop_start}, hop_limit: {hop_limit})"
                 signal_info = hops_raw_info if not signal_info else signal_info + hops_raw_info
+            else:
+                hop_start = hop_start or 0
+                hop_limit = hop_limit or 0
+                hops_raw_info = f" (hop_start: {hop_start}, hop_limit: {hop_limit})"
+                signal_info = hops_raw_info if not signal_info else signal_info + hops_raw_info                
         
         # Информация о получателе (для исходящих и автоответов)
         if is_outgoing or is_bot_reply:
@@ -1383,6 +1388,21 @@ Telegram timeout: {self.telegram_timeout}s
             pub.subscribe(self._handle_meshtastic_error, "meshtastic.error")
             logger.info("Подписка на события meshtastic установлена")
 
+    def _calculate_hop_count(self, packet):
+        """Сервисный метод: вычисление hop_count с fallback и camelCase ключами."""
+        hop_start = packet.get('hopStart')
+        hop_limit = packet.get('hopLimit')
+
+        logger.debug(f"Получено в пакете: hop_start={hop_start}, hop_limit={hop_limit}") 
+        
+        # Fallback: None → 0
+        hop_start = hop_start if hop_start is not None else 0
+        hop_limit = hop_limit if hop_limit is not None else 0
+
+        hop_count = max(0, hop_start - hop_limit)
+        logger.debug(f"Вычислено hop_count: {hop_count} (start={hop_start}, limit={hop_limit})")
+        return hop_count
+    
     def _on_receive(self, packet, interface):
         """Основной обработчик входящих сообщений из Meshtastic."""
         if 'decoded' not in packet or packet.get('decoded', {}).get('portnum') != 'TEXT_MESSAGE_APP':
@@ -1417,13 +1437,13 @@ Telegram timeout: {self.telegram_timeout}s
             snr = packet.get('rxSnr', 'unknown')
 
             hop_start = packet.get('hopStart')
-            hop_limit = packet.get('hopLimit')
-            hop_count = None
-            if hop_start is not None and hop_limit is not None:
-                hop_count = hop_start - hop_limit
-                logger.debug(f"Вычислено hop_count: {hop_count}")
-
-            via_id = packet.get('via')
+            hop_limit = packet.get('hopLimit')            
+            hop_count = self._calculate_hop_count(packet)
+                
+            logger.debug(f"Packet keys: {list(packet.keys())}")
+            
+            via_id = packet.get('via') or packet.get('relayNode')
+            logger.debug(f"Relay node: {via_id}")
             via_short_name = None
             if via_id:
                 via_short_name, _ = self._get_node_info(via_id, interface)
@@ -1497,12 +1517,8 @@ Telegram timeout: {self.telegram_timeout}s
             auto_reply_kwargs['channel'] = channel_name
 
         # Вычисляем hop_count
-        hop_start = packet.get('hopStart')
-        hop_limit = packet.get('hopLimit')
-        hop_count = None
-        if hop_start is not None and hop_limit is not None:
-            hop_count = hop_start - hop_limit
-
+        hop_count = self._calculate_hop_count(packet)
+    
         reply = None
         suffix = self.private_suffix if is_private else self.general_suffix
         
