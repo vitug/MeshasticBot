@@ -10,6 +10,7 @@ from telebot import types
 import threading
 import os
 from collections import OrderedDict
+from collections import defaultdict
 import re
 import requests
 
@@ -70,11 +71,13 @@ class MeshTelegramBot:
         self.telegram_timeout = 60  # Таймаут по умолчанию 60 секунд
         self.default_channel = None
         self.node_long_name = 'Node'  # Храним long_name в классе (fallback)
+        self.nodes_by_lower_byte = defaultdict(list)  # {lower_byte: [{'short_name': str, 'full_id': str}, ...]}        
         self.config_mtime = 0
         self.last_node_scan = 0
         self.node_scan_interval = 30
         self.messages_dir = 'messages_logs'
         self.pending_messages = {}  # Хранение ожидающих подтверждения сообщений {chat_id: dict}
+        self.node_hops = {}  # {full_num: min_hop} — минимальный hop для фильтрации нод
         
         # Флаги для автопереподключения
         self.is_connected = False
@@ -99,7 +102,7 @@ class MeshTelegramBot:
         self.last_watchdog_ping = time.time()
         self.watchdog_interval = 60
         self.notifier = SystemdNotifier() if HAS_SYSTEMD else None
-        self.has_systemd = HAS_SYSTEMD       
+        self.has_systemd = HAS_SYSTEMD
 
     # ==================== СЕРВИСНЫЕ МЕТОДЫ ====================
     
@@ -376,6 +379,31 @@ class MeshTelegramBot:
         
         return parts
 
+    def _get_node_by_num(self, num, interface):
+        """
+        Сервисный метод: поиск ноды по num (младший байт).
+        Возвращает: [маска] если не найдено; [маска, имя] если найдено.
+        E.g., ['xxf2', 'b6f2'] (найдено) или ['xxf2'] (не найдено).
+        """
+        if not interface or num is None or num == 0:  # 0 — direct/reserved
+            return None, None
+        
+        mask = f"xx{num:02x}"  # Всегда маска
+        
+        # Поиск с словаре близких нод
+        candidates = self.nodes_by_lower_byte.get(num, [])
+        if candidates:
+            short_names = [c['short_name'] for c in candidates]
+            full_ids = [c['full_id'] for c in candidates]
+            logger.debug(f"Найдено {len(candidates)} близких кандидатов по байту {num}: {short_names}")
+            short_names.insert(0, mask)
+            full_ids.insert(0, num)
+            return short_names, full_ids
+                
+        # Не найдено: Только маска
+        logger.debug(f"Только маска для {num}: {mask}")
+        return [mask], [num]
+        
     def _get_node_info(self, from_num, interface):
         """Сервисный метод: получение информации о ноде отправителя."""
         node = interface.nodesByNum.get(from_num)
@@ -397,6 +425,7 @@ class MeshTelegramBot:
         
         try:
             updated = False
+            self._update_nodes_by_lower_byte(self.interface)
             for num, node in self.interface.nodesByNum.items():
                 if 'user' in node:
                     short_name = node.get('user', {}).get('shortName', '').lower()
@@ -411,6 +440,39 @@ class MeshTelegramBot:
             logger.error(f"Ошибка сканирования нод: {e}")
             self._mark_disconnected()
 
+    def _update_nodes_by_lower_byte(self, interface):
+        """Сервисный метод: группировка нод по младшему байту (full_num & 0xFF) из nodesByNum."""
+        if not interface:
+            return
+        
+        self.nodes_by_lower_byte.clear()  # Очистка перед обновлением
+        
+        for full_num, node in interface.nodesByNum.items():
+            # Проверяем min_hop (из истории пакетов)
+            min_hop = self.node_hops.get(full_num, float('inf'))
+            if min_hop > 0:  # ФИЛЬТР: Добавляем только прямые ноды
+                continue
+            
+            lower_byte = full_num & 0xFF  # ← Всегда: младший байт через побитовую операцию
+            
+            short_name = node.get('user', {}).get('shortName', 'Unknown')
+            full_id = node.get('user', {}).get('id', f'!{full_num:08x}')  # Hex-строка из полного num
+            
+            self.nodes_by_lower_byte[lower_byte].append({
+                'short_name': short_name,
+                'full_id': full_id
+            })
+            # logger.debug(f"Добавлена нода в группу {lower_byte} (full_num={full_num}): {short_name} ({full_id})")
+        
+        # Логируем коллизии (если >1 на байт)
+        for byte, candidates in self.nodes_by_lower_byte.items():
+            if len(candidates) > 1:
+                names = [c['short_name'] for c in candidates]
+                logger.warning(f"Коллизия по младшему байту {byte}: {names}")
+        
+        total_nodes = sum(len(cands) for cands in self.nodes_by_lower_byte.values())
+        logger.info(f"Маппинг обновлён: {total_nodes} нод в {len(self.nodes_by_lower_byte)} байтах")
+            
     def _get_channel_name(self, packet):
         """Сервисный метод: получение имени канала из пакета."""
         channel_info = packet.get('decoded', {}).get('channel', {})
@@ -1389,22 +1451,29 @@ Telegram timeout: {self.telegram_timeout}s
             logger.info("Подписка на события meshtastic установлена")
 
     def _calculate_hop_count(self, packet):
-        """Сервисный метод: вычисление hop_count с fallback и camelCase ключами."""
+        """Сервисный метод: вычисление hop_count."""
         hop_start = packet.get('hopStart')
         hop_limit = packet.get('hopLimit')
 
-        logger.debug(f"Получено в пакете: hop_start={hop_start}, hop_limit={hop_limit}") 
+        # logger.debug(f"Получено в пакете: hop_start={hop_start}, hop_limit={hop_limit}") 
         
-        # Fallback: None → 0
         hop_start = hop_start if hop_start is not None else 0
         hop_limit = hop_limit if hop_limit is not None else 0
 
         hop_count = max(0, hop_start - hop_limit)
-        logger.debug(f"Вычислено hop_count: {hop_count} (start={hop_start}, limit={hop_limit})")
+        # logger.debug(f"Вычислено hop_count: {hop_count} (start={hop_start}, limit={hop_limit})")
         return hop_count
     
     def _on_receive(self, packet, interface):
         """Основной обработчик входящих сообщений из Meshtastic."""
+        
+        if 'from' in packet and 'hopStart' in packet:
+            from_num = packet['from']
+            hop_count = self._calculate_hop_count(packet)
+            hop_start = packet.get('hopStart')
+            hop_limit = packet.get('hopLimit')
+            self.node_hops[from_num] = min(self.node_hops.get(from_num, float('inf')), hop_count)        
+            
         if 'decoded' not in packet or packet.get('decoded', {}).get('portnum') != 'TEXT_MESSAGE_APP':
             return
 
@@ -1436,19 +1505,26 @@ Telegram timeout: {self.telegram_timeout}s
             rssi = packet.get('rxRssi', 'unknown')
             snr = packet.get('rxSnr', 'unknown')
 
-            hop_start = packet.get('hopStart')
-            hop_limit = packet.get('hopLimit')            
-            hop_count = self._calculate_hop_count(packet)
-                
-            logger.debug(f"Packet keys: {list(packet.keys())}")
-            
-            via_id = packet.get('via') or packet.get('relayNode')
-            logger.debug(f"Relay node: {via_id}")
+            via_num = packet.get('relayNode') or packet.get('via')
+            logger.debug(f"Relay node: {via_num}")
+            via_short_names = None
+            via_node_ids = None
             via_short_name = None
-            if via_id:
-                via_short_name, _ = self._get_node_info(via_id, interface)
-                logger.debug(f"VIA нода {via_id}: short_name={via_short_name}")
-
+            if hop_count > 0 and via_num:
+                via_short_names, via_node_ids = self._get_node_by_num(via_num, interface)
+                if via_short_names:
+                    via_short_name = (
+                        f"[{' or '.join(via_short_names)}]" 
+                        if len(via_short_names) > 1 
+                        else via_short_names[0] 
+                        if via_short_names 
+                        else "Unknown"
+                    )
+                    logger.debug(f"VIA нода {via_num}: short_names={via_short_name} (IDs: {via_node_ids})")
+                else:
+                    via_short_name = None
+                    logger.warning(f"VIA нода {via_num} не идентифицирована")
+                    
             send_kwargs = self._get_send_kwargs(reply_id, channel_name)
 
             # Запись ВХОДЯЩЕГО сообщения в файл
